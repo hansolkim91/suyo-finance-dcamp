@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "WebFetch(domain:opendart.fss.or.kr)",
+      "Bash(python3 *)",
+      "Bash(pip install *)",
+      "Bash(pnpm -v)",
+      "Bash(npm -v)",
+      "Bash(npm i *)",
+      "Bash(cd /tmp)",
+      "Bash(rm -rf suyo-tmp)",
+      "Bash(pnpm create *)",
+      "Bash(pnpm install *)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(rm -rf node_modules pnpm-lock.yaml)",
+      "Bash(npm install *)",
+      "Bash(rm -f pnpm-workspace.yaml)",
+      "Bash(npx shadcn@latest init --yes --base-color neutral)",
+      "Bash(npx shadcn@latest init --yes)",
+      "Bash(npx shadcn@latest init -d)"
+    ]
+  }
+}
