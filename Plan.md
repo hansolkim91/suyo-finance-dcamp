@@ -124,7 +124,7 @@
 ## 의존성·외부 조건
 - **환경변수 2종**: `AI_GATEWAY_API_KEY`(Vercel AI Gateway), `BLOB_READ_WRITE_TOKEN`(Vercel Blob Store)
 - **계정**: Vercel Hobby, GitHub
-- **런타임**: Node.js 20+, pnpm
+- **런타임**: Node.js 20+, npm (pnpm은 이 Windows 환경에서 심볼릭 링크 이슈로 실패하여 npm으로 전환)
 - **검증용 원본 데이터**: `C:\Users\디캠프\Desktop\삼성전자_크래프톤_재무분석-1.xlsx`, `C:\Users\디캠프\Desktop\랜식_재무분석_BurnRate.xlsx`
 
 ---
