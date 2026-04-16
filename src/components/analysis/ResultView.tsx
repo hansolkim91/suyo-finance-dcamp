@@ -371,12 +371,14 @@ const LISTED_RATIOS: RatioRow[] = [
     thresholds: [60, 80],
   },
   {
-    label: "매출총이익률",
+    label: "판관비율",
     calc: (y) =>
-      y.grossProfit && y.revenue ? (y.grossProfit / y.revenue) * 100 : null,
+      y.sgaExpenses && y.revenue
+        ? (Math.abs(y.sgaExpenses) / y.revenue) * 100
+        : null,
     format: "percent",
-    goodIf: "high",
-    thresholds: [30, 15],
+    goodIf: "low",
+    thresholds: [20, 35],
   },
   {
     label: "영업이익률",
@@ -395,16 +397,6 @@ const LISTED_RATIOS: RatioRow[] = [
     format: "percent",
     goodIf: "high",
     thresholds: [7, 3],
-  },
-  {
-    label: "판관비율",
-    calc: (y) =>
-      y.sgaExpenses && y.revenue
-        ? (Math.abs(y.sgaExpenses) / y.revenue) * 100
-        : null,
-    format: "percent",
-    goodIf: "low",
-    thresholds: [20, 35],
   },
   {
     label: "부채비율",
@@ -788,7 +780,7 @@ function KpiMini({
   );
 }
 
-// ── 구역 4-1: 사업모델 ──
+// ── 구역 4-1: 사업모델 + 회사 현황 ──
 
 function BusinessModelSection({
   item,
@@ -798,62 +790,45 @@ function BusinessModelSection({
   data: FinancialData;
 }) {
   const latest = data.years[0];
-  if (!latest) return <CategoryCard item={item} />;
-
-  const cogsRate =
-    latest.costOfGoodsSold && latest.revenue
-      ? (Math.abs(latest.costOfGoodsSold) / latest.revenue) * 100
-      : null;
-  const sgaRate =
-    latest.sgaExpenses && latest.revenue
-      ? (Math.abs(latest.sgaExpenses) / latest.revenue) * 100
-      : null;
-  const opExpRate =
-    cogsRate !== null && sgaRate !== null ? cogsRate + sgaRate : null;
 
   return (
     <CategoryCard item={item}>
-      <div className="grid grid-cols-3 gap-3">
-        <KpiMini
-          label="매출원가율"
-          value={cogsRate !== null ? `${cogsRate.toFixed(1)}%` : "-"}
-          status={
-            cogsRate === null
-              ? "neutral"
-              : cogsRate < 60
-                ? "good"
-                : cogsRate < 80
-                  ? "neutral"
-                  : "warning"
-          }
-        />
-        <KpiMini
-          label="판관비율"
-          value={sgaRate !== null ? `${sgaRate.toFixed(1)}%` : "-"}
-          status={
-            sgaRate === null
-              ? "neutral"
-              : sgaRate < 20
-                ? "good"
-                : sgaRate < 30
-                  ? "neutral"
-                  : "warning"
-          }
-        />
-        <KpiMini
-          label="영업비용률"
-          value={opExpRate !== null ? `${opExpRate.toFixed(1)}%` : "-"}
-          status={
-            opExpRate === null
-              ? "neutral"
-              : opExpRate < 85
-                ? "good"
-                : opExpRate < 95
-                  ? "neutral"
-                  : "warning"
-          }
-        />
-      </div>
+      {/* 주요 회사 현황 */}
+      {latest && (
+        <div className="rounded-lg border bg-muted/30 p-4">
+          <p className="mb-3 text-sm font-semibold">주요 회사 현황</p>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">회사명</span>
+              <span className="font-medium">{data.companyName}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">최신 연도</span>
+              <span className="font-medium">{latest.year}년</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">매출 규모</span>
+              <span className="font-medium">{formatWon(latest.revenue)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">자산 규모</span>
+              <span className="font-medium">{formatWon(latest.totalAssets)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">종업원 수</span>
+              <span className="font-medium text-muted-foreground">PDF 참조</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">분석 기간</span>
+              <span className="font-medium">
+                {data.years.length > 1
+                  ? `${data.years[data.years.length - 1].year}~${data.years[0].year}년 (${data.years.length}개년)`
+                  : `${data.years[0].year}년`}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
     </CategoryCard>
   );
 }
