@@ -349,6 +349,272 @@ function FinancialSummaryTable({ data }: { data: FinancialData }) {
   );
 }
 
+// ── 구역 3-1.5: 주요 재무 비율 표 ──
+
+type RatioRow = {
+  label: string;
+  calc: (y: YearData) => number | null;
+  format: "percent" | "ratio";
+  goodIf: "high" | "low";
+  thresholds: [number, number]; // [good, warning] 기준
+};
+
+const LISTED_RATIOS: RatioRow[] = [
+  {
+    label: "매출원가율",
+    calc: (y) =>
+      y.costOfGoodsSold && y.revenue
+        ? (Math.abs(y.costOfGoodsSold) / y.revenue) * 100
+        : null,
+    format: "percent",
+    goodIf: "low",
+    thresholds: [60, 80],
+  },
+  {
+    label: "매출총이익률",
+    calc: (y) =>
+      y.grossProfit && y.revenue ? (y.grossProfit / y.revenue) * 100 : null,
+    format: "percent",
+    goodIf: "high",
+    thresholds: [30, 15],
+  },
+  {
+    label: "영업이익률",
+    calc: (y) =>
+      y.operatingProfit && y.revenue
+        ? (y.operatingProfit / y.revenue) * 100
+        : null,
+    format: "percent",
+    goodIf: "high",
+    thresholds: [10, 5],
+  },
+  {
+    label: "순이익률",
+    calc: (y) =>
+      y.netIncome && y.revenue ? (y.netIncome / y.revenue) * 100 : null,
+    format: "percent",
+    goodIf: "high",
+    thresholds: [7, 3],
+  },
+  {
+    label: "판관비율",
+    calc: (y) =>
+      y.sgaExpenses && y.revenue
+        ? (Math.abs(y.sgaExpenses) / y.revenue) * 100
+        : null,
+    format: "percent",
+    goodIf: "low",
+    thresholds: [20, 35],
+  },
+  {
+    label: "부채비율",
+    calc: (y) =>
+      y.totalLiabilities && y.totalEquity
+        ? (y.totalLiabilities / y.totalEquity) * 100
+        : null,
+    format: "percent",
+    goodIf: "low",
+    thresholds: [100, 200],
+  },
+  {
+    label: "자기자본비율",
+    calc: (y) =>
+      y.totalEquity && y.totalAssets
+        ? (y.totalEquity / y.totalAssets) * 100
+        : null,
+    format: "percent",
+    goodIf: "high",
+    thresholds: [50, 30],
+  },
+  {
+    label: "ROE (자기자본이익률)",
+    calc: (y) =>
+      y.netIncome && y.totalEquity
+        ? (y.netIncome / y.totalEquity) * 100
+        : null,
+    format: "percent",
+    goodIf: "high",
+    thresholds: [15, 10],
+  },
+  {
+    label: "ROA (총자산이익률)",
+    calc: (y) =>
+      y.netIncome && y.totalAssets
+        ? (y.netIncome / y.totalAssets) * 100
+        : null,
+    format: "percent",
+    goodIf: "high",
+    thresholds: [5, 2],
+  },
+  {
+    label: "유동비율",
+    calc: (y) =>
+      y.currentAssets && y.currentLiabilities
+        ? (y.currentAssets / y.currentLiabilities) * 100
+        : null,
+    format: "percent",
+    goodIf: "high",
+    thresholds: [200, 100],
+  },
+  {
+    label: "이자보상배율",
+    calc: (y) =>
+      y.operatingProfit && y.interestExpense && y.interestExpense !== 0
+        ? y.operatingProfit / Math.abs(y.interestExpense)
+        : null,
+    format: "ratio",
+    goodIf: "high",
+    thresholds: [3, 1],
+  },
+];
+
+function getRatioStatus(
+  value: number | null,
+  goodIf: "high" | "low",
+  thresholds: [number, number]
+): Status {
+  if (value === null) return "neutral";
+  if (goodIf === "high") {
+    if (value >= thresholds[0]) return "good";
+    if (value >= thresholds[1]) return "neutral";
+    return "warning";
+  }
+  // low가 좋은 경우 (원가율, 부채비율 등)
+  if (value <= thresholds[0]) return "good";
+  if (value <= thresholds[1]) return "neutral";
+  return "warning";
+}
+
+function ratioStatusBadge(status: Status): React.ReactNode {
+  const config = {
+    good: { bg: "bg-emerald-100 dark:bg-emerald-900/40", text: "text-emerald-700 dark:text-emerald-400", label: "양호" },
+    neutral: { bg: "bg-amber-100 dark:bg-amber-900/40", text: "text-amber-700 dark:text-amber-400", label: "보통" },
+    warning: { bg: "bg-red-100 dark:bg-red-900/40", text: "text-red-700 dark:text-red-400", label: "주의" },
+  };
+  const c = config[status];
+  return (
+    <span className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-semibold ${c.bg} ${c.text}`}>
+      {c.label}
+    </span>
+  );
+}
+
+function FinancialRatiosTable({ data }: { data: FinancialData }) {
+  const years = data.years;
+  if (years.length === 0) return null;
+
+  // 값이 하나라도 있는 비율만 표시
+  const visibleRatios = LISTED_RATIOS.filter((r) =>
+    years.some((y) => r.calc(y) !== null)
+  );
+
+  if (visibleRatios.length === 0) return null;
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base">주요 재무 비율</CardTitle>
+        <p className="text-xs text-muted-foreground">
+          핵심 재무 항목에서 산출한 비율 지표
+        </p>
+      </CardHeader>
+      <CardContent className="p-0">
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-[160px] sticky left-0 bg-background z-10">
+                  지표
+                </TableHead>
+                {years.map((y, i) => (
+                  <TableHead key={y.year} className="text-right min-w-[90px]">
+                    {y.year}년
+                    {i === 0 && years.length > 1 && (
+                      <span className="ml-1 text-[10px] text-muted-foreground">
+                        (최신)
+                      </span>
+                    )}
+                  </TableHead>
+                ))}
+                {years.length > 1 && (
+                  <TableHead className="text-right min-w-[80px]">
+                    전년 대비
+                  </TableHead>
+                )}
+                <TableHead className="text-center w-[60px]">상태</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {visibleRatios.map((ratio) => {
+                const latestVal = ratio.calc(years[0]);
+                const prevVal = years[1] ? ratio.calc(years[1]) : null;
+                const yoyDiff =
+                  latestVal !== null && prevVal !== null
+                    ? latestVal - prevVal
+                    : null;
+                const status = getRatioStatus(
+                  latestVal,
+                  ratio.goodIf,
+                  ratio.thresholds
+                );
+
+                return (
+                  <TableRow key={ratio.label}>
+                    <TableCell className="font-medium sticky left-0 bg-background z-10">
+                      {ratio.label}
+                    </TableCell>
+                    {years.map((y) => {
+                      const val = ratio.calc(y);
+                      return (
+                        <TableCell
+                          key={y.year}
+                          className="text-right tabular-nums"
+                        >
+                          {val !== null
+                            ? ratio.format === "ratio"
+                              ? `${val.toFixed(1)}배`
+                              : `${val.toFixed(1)}%`
+                            : "-"}
+                        </TableCell>
+                      );
+                    })}
+                    {years.length > 1 && (
+                      <TableCell className="text-right">
+                        {yoyDiff !== null ? (
+                          <span
+                            className={`text-xs font-medium ${
+                              ratio.goodIf === "high"
+                                ? yoyDiff >= 0
+                                  ? "text-emerald-600 dark:text-emerald-400"
+                                  : "text-red-600 dark:text-red-400"
+                                : yoyDiff <= 0
+                                  ? "text-emerald-600 dark:text-emerald-400"
+                                  : "text-red-600 dark:text-red-400"
+                            }`}
+                          >
+                            {yoyDiff >= 0 ? "▲" : "▼"}{" "}
+                            {Math.abs(yoyDiff).toFixed(1)}
+                            {ratio.format === "ratio" ? "" : "%p"}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-gray-400">-</span>
+                        )}
+                      </TableCell>
+                    )}
+                    <TableCell className="text-center">
+                      {ratioStatusBadge(status)}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── 구역 3-2: 매출·이익 추이 차트 ──
 
 function RevenueProfitChart({ data }: { data: FinancialData }) {
@@ -1097,8 +1363,9 @@ export function ResultView({
         </CardContent>
       </Card>
 
-      {/* ── 3. 핵심 재무 요약표 + 매출·이익 차트 ── */}
+      {/* ── 3. 핵심 재무 요약표 + 재무 비율 + 매출·이익 차트 ── */}
       <FinancialSummaryTable data={financialData} />
+      <FinancialRatiosTable data={financialData} />
       <RevenueProfitChart data={financialData} />
 
       {/* ── 4. 카테고리별 상세 분석 ── */}
