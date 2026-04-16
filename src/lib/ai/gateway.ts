@@ -7,17 +7,23 @@ import type { LanguageModel } from "ai";
 /**
  * PDF에서 재무 데이터를 AI로 추출한다.
  *
- * 전략:
- * - 작은 PDF (4.5MB 이하): PDF 파일을 AI에 직접 전달 (가장 정확)
- * - 큰 PDF (4.5MB 초과): 텍스트 추출 후 앞 30,000자만 전달 (토큰 한도 대응)
- *
- * 왜 4.5MB 기준인가:
- * - Claude의 토큰 한도는 약 100만. PDF 1MB ≈ 약 30만 토큰
- * - 4.5MB면 약 135만 토큰으로 한도 초과 → 텍스트 모드로 전환
+ * 전략 (v3):
+ * - PDF 전체 텍스트에서 재무제표 3대 구간을 각각 찾아서 합침
+ *   (손익계산서 + 재무상태표 + 현금흐름표)
+ * - 이전 v1은 마커 1개만 찾아 60,000자 → 일부 재무표 누락
+ * - v2는 전체 전달 → API 토큰 한도 초과
+ * - v3은 3개 구간을 각각 찾아 합쳐서 ~150,000자 이내로 전달
  */
 
 function getModel(): LanguageModel {
-  // 1순위: Anthropic Claude (유료 결제 후 한도 충분)
+  // 1순위: Gemini (대용량 입력 지원)
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (geminiKey) {
+    const google = createGoogleGenerativeAI({ apiKey: geminiKey });
+    return google("gemini-2.5-flash");
+  }
+
+  // 2순위: Anthropic Claude (폴백)
   const anthropicKey =
     process.env.ANTHROPIC_API_KEY || process.env.AI_GATEWAY_API_KEY;
   if (anthropicKey) {
@@ -25,19 +31,12 @@ function getModel(): LanguageModel {
     return anthropic("claude-sonnet-4-6");
   }
 
-  // 2순위: Gemini (폴백)
-  const geminiKey = process.env.GEMINI_API_KEY;
-  if (geminiKey) {
-    const google = createGoogleGenerativeAI({ apiKey: geminiKey });
-    return google("gemini-2.5-flash");
-  }
-
   throw new Error(
     "AI API 키가 설정되지 않았습니다. .env.local에 ANTHROPIC_API_KEY 또는 GEMINI_API_KEY를 추가해주세요."
   );
 }
 
-const EXTRACTION_PROMPT = `이 PDF(또는 텍스트)는 한국 기업의 재무제표(사업보고서/감사보고서)입니다.
+const EXTRACTION_PROMPT = `이 텍스트는 한국 기업의 재무제표(사업보고서/감사보고서)에서 추출한 핵심 구간입니다.
 손익계산서, 재무상태표, 현금흐름표에서 재무 항목을 추출해주세요.
 
 추출 대상:
@@ -58,19 +57,136 @@ export async function extractFinancialDataFromPDF(
 ): Promise<FinancialData> {
   const model = getModel();
 
-  // PDF에서 전체 텍스트 추출 → 전부 AI에게 전달
   const fullText = await extractTextFromPdfBuffer(pdfBuffer);
+  const financialText = extractFinancialSections(fullText);
 
-  console.log(`PDF 전체 텍스트 ${fullText.length}자 전달`);
+  console.log(
+    `전체 ${fullText.length}자 → 재무 핵심 ${financialText.length}자 전달`
+  );
 
   const { object } = await generateObject({
     model,
     schema: financialDataSchema,
-    prompt: `${EXTRACTION_PROMPT}\n\n---\n${fullText}`,
+    prompt: `${EXTRACTION_PROMPT}\n\n---\n${financialText}`,
   });
   return object;
 }
 
+/**
+ * PDF 전체 텍스트에서 재무제표 3대 구간을 각각 찾아 합친다.
+ *
+ * 왜 3개 구간을 따로 찾는가:
+ * - DART 사업보고서에서 손익계산서, 재무상태표, 현금흐름표는
+ *   각각 다른 위치에 있을 수 있음
+ * - 마커 1개만 찾으면 뒤쪽 재무표가 잘릴 수 있음
+ * - 3개 구간을 각각 찾아서 합치면 누락 없이 모든 재무 데이터 확보
+ *
+ * 각 구간당 최대 40,000자 × 3 = 최대 120,000자 ≈ 60,000 토큰
+ * → Gemini 무료 한도(250,000 토큰/분) 이내
+ */
+function extractFinancialSections(fullText: string): string {
+  const SECTION_SIZE = 40000;
+  const sections: string[] = [];
+  const usedRanges: [number, number][] = [];
+
+  // 3대 재무제표 마커 그룹
+  const markerGroups = [
+    {
+      name: "손익계산서",
+      markers: [
+        "포 괄 손 익 계 산 서",
+        "포괄손익계산서",
+        "손 익 계 산 서",
+        "손익계산서",
+      ],
+    },
+    {
+      name: "재무상태표",
+      markers: [
+        "재 무 상 태 표",
+        "재무상태표",
+        "연 결 재 무 상 태 표",
+        "연결재무상태표",
+      ],
+    },
+    {
+      name: "현금흐름표",
+      markers: [
+        "현 금 흐 름 표",
+        "현금흐름표",
+        "연 결 현 금 흐 름 표",
+        "연결현금흐름표",
+      ],
+    },
+  ];
+
+  // "재무에 관한 사항" 전체 구간도 폴백으로 사용
+  const overallMarkers = [
+    "재 무 에 관 한 사 항",
+    "재무에 관한 사항",
+    "재무에관한사항",
+  ];
+
+  for (const group of markerGroups) {
+    let found = false;
+    for (const marker of group.markers) {
+      const idx = fullText.indexOf(marker);
+      if (idx !== -1 && !isOverlapping(idx, idx + SECTION_SIZE, usedRanges)) {
+        const end = Math.min(idx + SECTION_SIZE, fullText.length);
+        sections.push(
+          `\n=== ${group.name} 구간 ===\n${fullText.slice(idx, end)}`
+        );
+        usedRanges.push([idx, end]);
+        console.log(
+          `${group.name} 마커 발견: "${marker}" (위치: ${idx}/${fullText.length})`
+        );
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      console.log(`${group.name} 마커 없음`);
+    }
+  }
+
+  // 아무 구간도 못 찾았으면 "재무에 관한 사항"부터 큰 구간으로
+  if (sections.length === 0) {
+    for (const marker of overallMarkers) {
+      const idx = fullText.indexOf(marker);
+      if (idx !== -1) {
+        const bigSize = Math.min(120000, fullText.length - idx);
+        sections.push(fullText.slice(idx, idx + bigSize));
+        console.log(
+          `전체 재무 마커로 폴백: "${marker}" (위치: ${idx}, ${bigSize}자)`
+        );
+        break;
+      }
+    }
+  }
+
+  // 그래도 못 찾으면 뒤쪽 40%부터
+  if (sections.length === 0) {
+    const startIdx = Math.floor(fullText.length * 0.4);
+    const fallbackSize = Math.min(120000, fullText.length - startIdx);
+    sections.push(fullText.slice(startIdx, startIdx + fallbackSize));
+    console.log(
+      `재무 마커 전혀 없음 → 텍스트 40% 지점(${startIdx})부터 ${fallbackSize}자 사용`
+    );
+  }
+
+  return sections.join("\n\n");
+}
+
+function isOverlapping(
+  start: number,
+  end: number,
+  ranges: [number, number][]
+): boolean {
+  for (const [rStart, rEnd] of ranges) {
+    if (start < rEnd && end > rStart) return true;
+  }
+  return false;
+}
 
 /**
  * PDF 전체 텍스트를 추출한다.
