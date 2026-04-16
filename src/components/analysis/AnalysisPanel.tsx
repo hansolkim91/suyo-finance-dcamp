@@ -10,25 +10,34 @@ import { calculatePrivateMetrics } from "@/lib/finance/metrics/private";
 import type { FinancialData } from "@/lib/finance/types";
 
 /**
- * 분석 패널: 업로드 → 분석 → 체크리스트 표시
+ * 분석 패널 v3: 원시 FinancialData도 ResultView에 전달
  *
- * 변경된 흐름:
- * 1. PDF 업로드 (Blob)
- * 2. /api/analyze → 재무 데이터 추출 (AI)
- * 3. 클라이언트에서 지표 계산
- * 4. /api/explain → 체크리스트 분석 (AI, 구조화 JSON)
- * 5. 체크리스트 테이블 표시
- *
- * 왜 2단계 AI 호출인가:
- * - 1차(analyze): PDF에서 숫자를 정확히 뽑아내는 데 집중
- * - 2차(explain): 뽑아낸 숫자로 체크리스트 분석을 작성
- * - 역할을 나누면 각 단계의 정확도가 올라감
+ * 왜 raw data가 필요한가:
+ * - metricsPerYear는 비율(%) 지표만 포함
+ * - 재무 선배 스타일은 "매출액 333.6조, 영업이익 XX억" 같은 절대 숫자가 먼저 나와야 함
+ * - FinancialData.years에 매출액/영업이익/순이익 등 원시 금액이 있음
  */
+
+type YearMetrics = {
+  year: string;
+  metrics: {
+    name: string;
+    value: number | null;
+    unit: string;
+    description: string;
+    category?: string;
+  }[];
+};
 
 type AnalysisState =
   | { status: "idle" }
   | { status: "analyzing"; step: number }
-  | { status: "done"; result: ChecklistResult }
+  | {
+      status: "done";
+      result: ChecklistResult;
+      metricsPerYear: YearMetrics[];
+      financialData: FinancialData;
+    }
   | { status: "error"; message: string };
 
 type AnalysisPanelProps = {
@@ -37,9 +46,15 @@ type AnalysisPanelProps = {
 
 const STEPS = [
   { message: "PDF를 서버로 전송 중...", sub: "파일 업로드" },
-  { message: "AI가 재무제표를 읽는 중...", sub: "손익계산서, 재무상태표, 현금흐름표 탐색" },
+  {
+    message: "AI가 재무제표를 읽는 중...",
+    sub: "손익계산서, 재무상태표, 현금흐름표 탐색",
+  },
   { message: "재무 지표를 계산하는 중...", sub: "수익성, 안정성, 성장성 분석" },
-  { message: "체크리스트 분석을 작성하는 중...", sub: "AI가 5개 항목별 분석 생성 중" },
+  {
+    message: "AI 대시보드를 생성하는 중...",
+    sub: "카테고리별 점수 산정 + 종합 의견 작성",
+  },
 ];
 
 function AnalyzingLoader({ step }: { step: number }) {
@@ -91,7 +106,6 @@ export function AnalysisPanel({ tabType }: AnalysisPanelProps) {
       setState({ status: "analyzing", step: 0 });
 
       try {
-        // 1단계: PDF에서 재무 데이터 추출
         setState({ status: "analyzing", step: 1 });
         const analyzeRes = await fetch("/api/analyze", {
           method: "POST",
@@ -108,7 +122,6 @@ export function AnalysisPanel({ tabType }: AnalysisPanelProps) {
           return;
         }
 
-        // 2단계: 지표 계산
         setState({ status: "analyzing", step: 2 });
         const data = analyzeJson.data as FinancialData;
         const metricsPerYear =
@@ -116,7 +129,6 @@ export function AnalysisPanel({ tabType }: AnalysisPanelProps) {
             ? calculateListedMetrics(data)
             : calculatePrivateMetrics(data);
 
-        // 3단계: AI 체크리스트 분석
         setState({ status: "analyzing", step: 3 });
         const explainRes = await fetch("/api/explain", {
           method: "POST",
@@ -137,7 +149,12 @@ export function AnalysisPanel({ tabType }: AnalysisPanelProps) {
           return;
         }
 
-        setState({ status: "done", result: checklistResult });
+        setState({
+          status: "done",
+          result: checklistResult,
+          metricsPerYear,
+          financialData: data,
+        });
       } catch {
         setState({
           status: "error",
@@ -155,7 +172,10 @@ export function AnalysisPanel({ tabType }: AnalysisPanelProps) {
   return (
     <div className="space-y-6">
       {(state.status === "idle" || state.status === "error") && (
-        <PdfUploader tabType={tabType} onUploadComplete={handleUploadComplete} />
+        <PdfUploader
+          tabType={tabType}
+          onUploadComplete={handleUploadComplete}
+        />
       )}
 
       {state.status === "error" && (
@@ -164,7 +184,8 @@ export function AnalysisPanel({ tabType }: AnalysisPanelProps) {
             <div className="flex flex-col items-center gap-3 py-4 text-center">
               <p className="font-medium text-destructive">{state.message}</p>
               <p className="text-xs text-muted-foreground">
-                다른 PDF 파일로 다시 시도하거나, 텍스트 기반 PDF인지 확인해주세요.
+                다른 PDF 파일로 다시 시도하거나, 텍스트 기반 PDF인지
+                확인해주세요.
               </p>
             </div>
           </CardContent>
@@ -175,7 +196,12 @@ export function AnalysisPanel({ tabType }: AnalysisPanelProps) {
 
       {state.status === "done" && (
         <>
-          <ResultView result={state.result} type={tabType} />
+          <ResultView
+            result={state.result}
+            metricsPerYear={state.metricsPerYear}
+            financialData={state.financialData}
+            type={tabType}
+          />
           <div className="flex justify-center pt-2 pb-8">
             <button
               onClick={handleReset}
