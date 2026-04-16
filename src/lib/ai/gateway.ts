@@ -58,59 +58,19 @@ export async function extractFinancialDataFromPDF(
 ): Promise<FinancialData> {
   const model = getModel();
 
-  // PDF에서 전체 텍스트 추출 후 재무제표 구간만 발췌
+  // PDF에서 전체 텍스트 추출 → 전부 AI에게 전달
   const fullText = await extractTextFromPdfBuffer(pdfBuffer);
-  const financialText = findFinancialSection(fullText);
 
-  console.log(
-    `전체 ${fullText.length}자 → 재무 구간 ${financialText.length}자 전달`
-  );
+  console.log(`PDF 전체 텍스트 ${fullText.length}자 전달`);
 
   const { object } = await generateObject({
     model,
     schema: financialDataSchema,
-    prompt: `${EXTRACTION_PROMPT}\n\n---\n${financialText}`,
+    prompt: `${EXTRACTION_PROMPT}\n\n---\n${fullText}`,
   });
   return object;
 }
 
-/**
- * 전체 텍스트에서 재무제표가 있는 구간을 찾아 60,000자를 반환한다.
- *
- * DART 사업보고서 구조:
- * - 앞부분: 목차 → 회사개요 → 사업내용 (재무 숫자 없음)
- * - 중간~뒷부분: "III. 재무에 관한 사항" → 실제 재무제표
- *
- * 60,000자 ≈ 30,000 토큰 — Gemini 무료 한도(25만/분)에 여유 있음
- */
-function findFinancialSection(fullText: string): string {
-  const MAX_CHARS = 60000;
-
-  // 재무제표 시작 마커 (DART 표준 구조)
-  const markers = [
-    "재 무 에 관 한 사 항",
-    "재무에 관한 사항",
-    "재무에관한사항",
-    "연 결 재 무 제 표",
-    "연결재무제표",
-    "연결 재무제표",
-    "포 괄 손 익 계 산 서",
-    "포괄손익계산서",
-  ];
-
-  for (const marker of markers) {
-    const idx = fullText.indexOf(marker);
-    if (idx !== -1) {
-      console.log(`재무 구간 마커 발견: "${marker}" (위치: ${idx}/${fullText.length})`);
-      return fullText.slice(idx, idx + MAX_CHARS);
-    }
-  }
-
-  // 마커를 못 찾으면 뒤쪽 40%부터 (재무표는 보통 뒷부분에 위치)
-  const startIdx = Math.floor(fullText.length * 0.4);
-  console.log(`재무 마커 없음 → 텍스트 40% 지점(${startIdx})부터 사용`);
-  return fullText.slice(startIdx, startIdx + MAX_CHARS);
-}
 
 /**
  * PDF 전체 텍스트를 추출한다.
