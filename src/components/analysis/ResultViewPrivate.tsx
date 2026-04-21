@@ -21,6 +21,7 @@ import {
 import { ScoreGauge } from "./shared/ScoreGauge";
 import { KpiMini } from "./shared/CategoryCard";
 import { formatWon, formatChartAmount } from "./shared/format";
+import { FinancialSummaryTable } from "./shared/FinancialSummaryTable";
 import type { ChecklistResult, YearMetrics } from "./shared/types";
 import { CashPositionBar } from "./private/CashPositionBar";
 import { RunwayScenarioTable } from "./private/RunwayScenarioTable";
@@ -151,7 +152,10 @@ export function ResultViewPrivate({
         </CardContent>
       </Card>
 
-      {/* ③ 현금 포지션 */}
+      {/* ③ 핵심 재무 요약표 (상장과 동일 포맷, 과거→최신 순) */}
+      <FinancialSummaryTable data={financialData} />
+
+      {/* ④ 현금 포지션 */}
       <CashPositionBar position={cashPosition} />
 
       {/* ④ Burn Rate */}

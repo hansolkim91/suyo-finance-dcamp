@@ -22,7 +22,7 @@ import {
   Line,
   ComposedChart,
 } from "recharts";
-import type { FinancialData, YearData } from "@/lib/finance/types";
+import type { FinancialData } from "@/lib/finance/types";
 import {
   CATEGORY_METRICS,
   METRIC_DESCRIPTIONS,
@@ -32,13 +32,11 @@ import {
 import { ScoreGauge } from "./shared/ScoreGauge";
 import { CategoryRadar } from "./shared/CategoryRadar";
 import { InfoTooltip } from "./shared/InfoTooltip";
+import { FinancialSummaryTable } from "./shared/FinancialSummaryTable";
 import {
-  formatWon,
   formatPercent,
-  calcYoy,
   formatChartAmount,
 } from "./shared/format";
-import { yoyBadge } from "./shared/badges";
 import type { ChecklistResult, YearMetrics } from "./shared/types";
 import { ValuationCard } from "./listed/ValuationCard";
 import { PeerComparisonTable } from "./listed/PeerComparisonTable";
@@ -58,95 +56,7 @@ type ResultViewListedProps = {
   financialData: FinancialData;
 };
 
-// ────────────────────────────────────────────────
-// 핵심 재무 요약표 (절대 금액 — 1회만)
-// ────────────────────────────────────────────────
-function FinancialSummaryTable({ data }: { data: FinancialData }) {
-  const years = data.years;
-  if (years.length === 0) return null;
-
-  const rows: { label: string; key: keyof YearData }[] = [
-    { label: "매출액", key: "revenue" },
-    { label: "매출원가", key: "costOfGoodsSold" },
-    { label: "매출총이익", key: "grossProfit" },
-    { label: "영업이익", key: "operatingProfit" },
-    { label: "당기순이익", key: "netIncome" },
-    { label: "자산총계", key: "totalAssets" },
-    { label: "부채총계", key: "totalLiabilities" },
-    { label: "자본총계", key: "totalEquity" },
-    { label: "영업활동 현금흐름", key: "operatingCashFlow" },
-    { label: "현금·현금성자산", key: "cashBalance" },
-  ];
-  const visibleRows = rows.filter((row) =>
-    years.some((y) => y[row.key] !== null)
-  );
-
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-base">핵심 재무 요약</CardTitle>
-        <p className="text-xs text-muted-foreground">
-          단위: 원 (조/억 자동 변환)
-        </p>
-      </CardHeader>
-      <CardContent className="p-0">
-        <div className="overflow-x-auto">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-[140px] sticky left-0 bg-background z-10">
-                  항목
-                </TableHead>
-                {years.map((y, i) => (
-                  <TableHead key={y.year} className="text-right min-w-[100px]">
-                    {y.year}년
-                    {i === 0 && years.length > 1 && (
-                      <span className="ml-1 text-[10px] text-muted-foreground">
-                        (최신)
-                      </span>
-                    )}
-                  </TableHead>
-                ))}
-                {years.length > 1 && (
-                  <TableHead className="text-right min-w-[80px]">
-                    전년 대비
-                  </TableHead>
-                )}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {visibleRows.map((row) => {
-                const latestVal = years[0]?.[row.key] as number | null;
-                const prevVal = years[1]?.[row.key] as number | null;
-                const yoy = calcYoy(latestVal, prevVal);
-                return (
-                  <TableRow key={row.key}>
-                    <TableCell className="font-medium sticky left-0 bg-background z-10">
-                      {row.label}
-                    </TableCell>
-                    {years.map((y) => (
-                      <TableCell
-                        key={y.year}
-                        className="text-right tabular-nums"
-                      >
-                        {formatWon(y[row.key] as number | null)}
-                      </TableCell>
-                    ))}
-                    {years.length > 1 && (
-                      <TableCell className="text-right">
-                        {yoyBadge(yoy)}
-                      </TableCell>
-                    )}
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
+// 핵심 재무 요약표는 shared/FinancialSummaryTable (상장·비상장 공통)
 
 // ────────────────────────────────────────────────
 // 신호등 배지 (status → 컬러 칩)
@@ -179,8 +89,12 @@ function CategoryMetricsTable({
   metricNames: string[];
   unit?: string;
 }) {
+  // 차트와 동일하게 과거→최신 순 (2023 → 2024 → 2025)
+  const orderedYears = metricsPerYear.slice().reverse();
+  const latestIdx = orderedYears.length - 1;
+
   const visible = metricNames.filter((name) =>
-    metricsPerYear.some((ym) =>
+    orderedYears.some((ym) =>
       ym.metrics.some((m) => m.name === name && m.value !== null)
     )
   );
@@ -194,10 +108,10 @@ function CategoryMetricsTable({
             <TableHead className="w-[180px] sticky left-0 bg-background z-10">
               지표
             </TableHead>
-            {metricsPerYear.map((ym, i) => (
+            {orderedYears.map((ym, i) => (
               <TableHead key={ym.year} className="text-right">
                 {ym.year}년
-                {i === 0 && metricsPerYear.length > 1 && (
+                {i === latestIdx && orderedYears.length > 1 && (
                   <span className="ml-1 text-[10px] text-muted-foreground">
                     (최신)
                   </span>
@@ -209,7 +123,7 @@ function CategoryMetricsTable({
         </TableHeader>
         <TableBody>
           {visible.map((name) => {
-            const latestMetric = metricsPerYear[0]?.metrics.find(
+            const latestMetric = orderedYears[latestIdx]?.metrics.find(
               (m) => m.name === name
             );
             const status = getSignalStatus(name, latestMetric?.value ?? null);
@@ -223,7 +137,7 @@ function CategoryMetricsTable({
                 <TableCell className="font-medium sticky left-0 bg-background z-10 overflow-visible">
                   <InfoTooltip label={name} description={description} />
                 </TableCell>
-                {metricsPerYear.map((ym) => {
+                {orderedYears.map((ym) => {
                   const m = ym.metrics.find((mm) => mm.name === name);
                   return (
                     <TableCell
