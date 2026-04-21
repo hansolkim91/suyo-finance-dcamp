@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { del } from "@vercel/blob";
-import { extractFinancialDataFromPDF } from "@/lib/ai/gateway";
+import {
+  extractFinancialDataFromPDF,
+  ScannedPdfError,
+} from "@/lib/ai/gateway";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -49,6 +52,28 @@ export async function POST(request: Request) {
   } catch (error) {
     const message = (error as Error).message;
     console.error("분석 에러:", message);
+
+    // 사용자 친화 에러 메시지 분기
+    if (error instanceof ScannedPdfError) {
+      return NextResponse.json(
+        {
+          error:
+            "스캔본/이미지 PDF는 지원하지 않습니다. DART·전자공시에서 다운로드한 텍스트 기반 PDF를 업로드해주세요.",
+          detail: message,
+        },
+        { status: 400 }
+      );
+    }
+    if (message.includes("high demand") || message.includes("UNAVAILABLE")) {
+      return NextResponse.json(
+        {
+          error:
+            "AI 서비스가 일시적으로 과부하 상태입니다. 1~2분 후 다시 시도해주세요.",
+          detail: message,
+        },
+        { status: 503 }
+      );
+    }
 
     return NextResponse.json(
       { error: "분석 중 오류가 발생했습니다.", detail: message },

@@ -4,6 +4,24 @@ import { generateObject } from "ai";
 import { financialDataSchema, type FinancialData } from "../finance/types";
 import type { LanguageModel } from "ai";
 
+// 스캔/이미지 PDF 감지 임계값 — 텍스트가 이 길이 미만이면 Vision(OCR) 경로로 분기
+const MIN_TEXT_LENGTH_FOR_ANALYSIS = 500;
+
+/**
+ * 스캔본/이미지 PDF도 분석할 수 있도록, AI에 PDF를 직접 전송(멀티모달)하여
+ * 모델이 내장 OCR로 텍스트를 읽고 바로 구조화 데이터를 반환하도록 한다.
+ *
+ * 조건부로 유지하는 에러 타입 — Vision 경로조차 실패할 때 화면 안내용.
+ */
+export class ScannedPdfError extends Error {
+  constructor(reason: string) {
+    super(
+      `이미지·스캔 PDF의 OCR 처리에 실패했습니다 (${reason}). 해상도가 낮거나 손상된 PDF일 수 있습니다.`
+    );
+    this.name = "ScannedPdfError";
+  }
+}
+
 /**
  * PDF에서 재무 데이터를 AI로 추출한다.
  *
@@ -11,25 +29,30 @@ import type { LanguageModel } from "ai";
  * 텍스트 자르기/구간 추출 없이 전체를 그대로 AI에게 전달 (Gemini Tier 1 토큰 한도 충분).
  */
 
-function getModel(): LanguageModel {
-  // 1순위: Gemini (대용량 입력 지원)
+/**
+ * primary(Gemini) + fallback(Anthropic) 두 모델 반환.
+ * Gemini 503 / rate limit 시 자동 폴백.
+ */
+function getModels(): {
+  primary: LanguageModel | null;
+  fallback: LanguageModel | null;
+} {
   const geminiKey = process.env.GEMINI_API_KEY;
-  if (geminiKey) {
-    const google = createGoogleGenerativeAI({ apiKey: geminiKey });
-    return google("gemini-2.5-flash");
-  }
-
-  // 2순위: Anthropic Claude (폴백)
   const anthropicKey =
     process.env.ANTHROPIC_API_KEY || process.env.AI_GATEWAY_API_KEY;
-  if (anthropicKey) {
-    const anthropic = createAnthropic({ apiKey: anthropicKey });
-    return anthropic("claude-sonnet-4-6");
-  }
 
-  throw new Error(
-    "AI API 키가 설정되지 않았습니다. .env.local에 ANTHROPIC_API_KEY 또는 GEMINI_API_KEY를 추가해주세요."
-  );
+  const primary = geminiKey
+    ? createGoogleGenerativeAI({ apiKey: geminiKey })("gemini-2.5-flash")
+    : anthropicKey
+      ? createAnthropic({ apiKey: anthropicKey })("claude-sonnet-4-6")
+      : null;
+
+  const fallback =
+    geminiKey && anthropicKey
+      ? createAnthropic({ apiKey: anthropicKey })("claude-sonnet-4-6")
+      : null;
+
+  return { primary, fallback };
 }
 
 const EXTRACTION_PROMPT = `이 텍스트는 한국 기업의 사업보고서/감사보고서 전체입니다.
@@ -62,18 +85,81 @@ const EXTRACTION_PROMPT = `이 텍스트는 한국 기업의 사업보고서/감
 export async function extractFinancialDataFromPDF(
   pdfBuffer: Buffer
 ): Promise<FinancialData> {
-  const model = getModel();
+  const { primary, fallback } = getModels();
+  if (!primary) {
+    throw new Error(
+      "AI API 키가 설정되지 않았습니다. .env.local에 ANTHROPIC_API_KEY 또는 GEMINI_API_KEY를 추가해주세요."
+    );
+  }
 
   const fullText = await extractTextFromPdfBuffer(pdfBuffer);
 
-  console.log(`PDF 전체 ${fullText.length}자 → AI 1회 호출`);
+  // 텍스트 레이어가 충분하면 기존 텍스트 기반 경로 (빠름·저렴)
+  if (fullText.trim().length >= MIN_TEXT_LENGTH_FOR_ANALYSIS) {
+    console.log(`PDF 텍스트 ${fullText.length}자 → 텍스트 기반 AI 호출`);
+    return await withFallback(primary, fallback, (model) =>
+      generateObject({
+        model,
+        schema: financialDataSchema,
+        prompt: `${EXTRACTION_PROMPT}\n\n---\n${fullText}`,
+      })
+    );
+  }
 
-  const { object } = await generateObject({
-    model,
-    schema: financialDataSchema,
-    prompt: `${EXTRACTION_PROMPT}\n\n---\n${fullText}`,
-  });
-  return object;
+  // 스캔본/이미지 PDF → Vision 경로 (AI가 PDF 파일 자체를 OCR)
+  console.log(
+    `PDF 텍스트 ${fullText.trim().length}자만 추출됨 → Vision(OCR) 경로 전환`
+  );
+  try {
+    return await withFallback(primary, fallback, (model) =>
+      generateObject({
+        model,
+        schema: financialDataSchema,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: `${EXTRACTION_PROMPT}\n\n위 규칙에 따라 첨부된 PDF에서 재무 데이터를 추출하세요. PDF의 텍스트 레이어가 없을 수 있으니 이미지 페이지를 OCR하여 숫자를 읽어내세요.`,
+              },
+              {
+                type: "file",
+                data: pdfBuffer,
+                mediaType: "application/pdf",
+              },
+            ],
+          },
+        ],
+      })
+    );
+  } catch (err) {
+    const msg = (err as Error).message ?? "알 수 없는 오류";
+    throw new ScannedPdfError(msg);
+  }
+}
+
+/**
+ * primary → fallback 순으로 generateObject 시도 (generic).
+ */
+async function withFallback<T>(
+  primary: LanguageModel,
+  fallback: LanguageModel | null,
+  call: (model: LanguageModel) => Promise<{ object: T }>
+): Promise<T> {
+  try {
+    const { object } = await call(primary);
+    return object;
+  } catch (primaryErr) {
+    console.warn(
+      "[extract] primary 실패:",
+      (primaryErr as Error).message ?? primaryErr
+    );
+    if (!fallback) throw primaryErr;
+    console.log("[extract] fallback(Anthropic) 시도");
+    const { object } = await call(fallback);
+    return object;
+  }
 }
 
 /**

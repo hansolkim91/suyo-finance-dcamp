@@ -181,11 +181,12 @@ export function AnalysisPanel({ tabType }: AnalysisPanelProps) {
       {state.status === "error" && (
         <Card className="border-red-200 dark:border-red-800">
           <CardContent>
-            <div className="flex flex-col items-center gap-3 py-4 text-center">
-              <p className="font-medium text-destructive">{state.message}</p>
+            <div className="flex flex-col items-center gap-2 py-4 text-center">
+              <p className="font-medium text-destructive leading-relaxed">
+                {state.message}
+              </p>
               <p className="text-xs text-muted-foreground">
-                다른 PDF 파일로 다시 시도하거나, 텍스트 기반 PDF인지
-                확인해주세요.
+                아래 영역에서 다시 업로드해주세요.
               </p>
             </div>
           </CardContent>
