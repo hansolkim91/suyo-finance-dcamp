@@ -83,7 +83,8 @@
       "Bash(vercel whoami *)",
       "Bash(vercel link *)",
       "Bash(vercel ls *)",
-      "Bash(vercel alias *)"
+      "Bash(vercel alias *)",
+      "Bash(vercel logs *)"
     ],
     "deny": [
       "Bash(git push*)",

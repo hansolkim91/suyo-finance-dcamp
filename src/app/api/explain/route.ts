@@ -5,7 +5,8 @@ import { z } from "zod";
 import type { LanguageModel } from "ai";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+// Fluid Compute 기본 허용치 — AI 응답(Gemini + Anthropic fallback + 길어진 insight)으로 60초 초과 가능
+export const maxDuration = 300;
 
 /**
  * 체크리스트 분석 API (v2 — 대시보드용)
