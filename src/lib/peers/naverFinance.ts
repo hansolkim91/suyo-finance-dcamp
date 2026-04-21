@@ -29,6 +29,22 @@ function parseNumber(raw: string | undefined): number | null {
   return isNaN(num) ? null : num;
 }
 
+/**
+ * 네이버 시가총액 포맷 "872조 3,477" → 원 단위 숫자.
+ * "조"와 "억(쉼표 숫자)"을 각각 파싱하여 합산 후 억 단위 × 10^8.
+ */
+function parseMarketCap(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const clean = raw.replace(/\s+/g, " ").trim();
+  const joMatch = clean.match(/(\d+)\s*조/);
+  const jo = joMatch ? parseInt(joMatch[1], 10) : 0;
+  const after = joMatch ? clean.slice(joMatch.index! + joMatch[0].length) : clean;
+  const eokDigits = after.replace(/[^\d,]/g, "").replace(/,/g, "");
+  const eok = eokDigits ? parseInt(eokDigits, 10) : 0;
+  const totalEok = jo * 10000 + eok;
+  return totalEok > 0 ? totalEok * 100_000_000 : null;
+}
+
 function matchFirst(html: string, regex: RegExp): string | undefined {
   const m = html.match(regex);
   return m?.[1];
@@ -51,41 +67,30 @@ function parseNaverHtml(html: string, stockCode: string): PeerData {
     html.match(/현재가\s*([\d,]+)/);
   const currentPrice = parseNumber(priceMatch?.[1]);
 
-  // PER, PBR, EPS, BPS: <strong>LABEL(...)</strong></th> <td ...> [<em ...>] VALUE [</em>] </td>
-  // 음수나 적자 기업은 <em class="f_up"> 같은 태그로 감싸지므로 em 태그를 선택적으로 허용.
+  // PER, PBR, EPS: 상단 "투자정보" 요약 박스의 id 기반 엘리먼트 사용
+  // (하단 "종목분석" 표는 예측/분기별 여러 값이 섞여있어 부정확)
+  // 패턴: <em id="_per">20.76</em>배
   const per = parseNumber(
-    matchFirst(
-      html,
-      /PER\(배\)<\/strong><\/th>\s*<td[^>]*>\s*(?:<em[^>]*>\s*)?(-?[\d,.]+)/
-    )
+    matchFirst(html, /id="_per">\s*(-?[\d,.]+)\s*<\/em>/)
   );
   const pbr = parseNumber(
-    matchFirst(
-      html,
-      /PBR\(배\)<\/strong><\/th>\s*<td[^>]*>\s*(?:<em[^>]*>\s*)?(-?[\d,.]+)/
-    )
+    matchFirst(html, /id="_pbr">\s*(-?[\d,.]+)\s*<\/em>/)
   );
   const eps = parseNumber(
-    matchFirst(
-      html,
-      /EPS\(원\)<\/strong><\/th>\s*<td[^>]*>\s*(?:<em[^>]*>\s*)?(-?[\d,.]+)/
-    )
+    matchFirst(html, /id="_eps">\s*(-?[\d,.]+)\s*<\/em>/)
   );
+  // BPS는 _pbr 뒤 형제 <em>에 위치 (id="_pbr">...</em>배 l <em>174,539</em>원)
   const bps = parseNumber(
     matchFirst(
       html,
-      /BPS\(원\)<\/strong><\/th>\s*<td[^>]*>\s*(?:<em[^>]*>\s*)?(-?[\d,.]+)/
+      /id="_pbr">[\s\S]{0,200}?<em>\s*(-?[\d,.]+)\s*<\/em>\s*원/
     )
   );
 
-  // 시가총액(억원 단위) → 원으로 변환
-  const marketCapEok = parseNumber(
-    matchFirst(
-      html,
-      /시가총액\(억\)<\/span><\/th>\s*<td[^>]*>\s*([\d,]+)\s*<\/td>/
-    )
+  // 시가총액: <em id="_market_sum"> 872조 3,477 </em>억원 형식
+  const marketCap = parseMarketCap(
+    matchFirst(html, /id="_market_sum">([^<]+)<\/em>/)
   );
-  const marketCap = marketCapEok !== null ? marketCapEok * 100_000_000 : null;
 
   // 52주 최고/최저: <em>HIGH</em> ... <em>LOW</em>
   const high52w = parseNumber(

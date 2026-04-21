@@ -62,33 +62,34 @@ const checklistSchema = z.object({
 });
 
 /**
- * explain은 Gemini 우선 사용.
+ * explain은 Gemini 우선 사용, Gemini 일시 장애(503) 시 Anthropic 폴백.
  *
- * 왜: analyze(데이터 추출)에서 Anthropic 토큰을 이미 소모하므로,
- * Gemini로 역할을 분담하면 rate limit 회피 + 비용 절감.
+ * 왜: analyze에서 Anthropic 토큰 소모 → Gemini로 분산이 기본이지만,
+ * Gemini 503(과부하)도 종종 발생하므로 Anthropic을 fallback으로 활용.
  */
-function getModel(): LanguageModel {
+function getModels(): { primary: LanguageModel | null; fallback: LanguageModel | null } {
   const geminiKey = process.env.GEMINI_API_KEY;
-  if (geminiKey) {
-    const google = createGoogleGenerativeAI({ apiKey: geminiKey });
-    return google("gemini-2.5-flash");
-  }
-
   const anthropicKey =
     process.env.ANTHROPIC_API_KEY || process.env.AI_GATEWAY_API_KEY;
-  if (anthropicKey) {
-    const anthropic = createAnthropic({ apiKey: anthropicKey });
-    return anthropic("claude-sonnet-4-6");
-  }
 
-  throw new Error("NO_API_KEY");
+  const primary = geminiKey
+    ? createGoogleGenerativeAI({ apiKey: geminiKey })("gemini-2.5-flash")
+    : anthropicKey
+      ? createAnthropic({ apiKey: anthropicKey })("claude-sonnet-4-6")
+      : null;
+
+  // primary가 Gemini면 Anthropic을 fallback, 둘 다 같은 공급자면 fallback 없음
+  const fallback =
+    geminiKey && anthropicKey
+      ? createAnthropic({ apiKey: anthropicKey })("claude-sonnet-4-6")
+      : null;
+
+  return { primary, fallback };
 }
 
 export async function POST(request: Request) {
-  let model: LanguageModel;
-  try {
-    model = getModel();
-  } catch {
+  const { primary, fallback } = getModels();
+  if (!primary) {
     return Response.json(
       { error: "AI API 키가 설정되지 않았습니다." },
       { status: 500 }
@@ -165,24 +166,72 @@ export async function POST(request: Request) {
 
   const systemPrompt = type === "listed" ? listedPrompt : privatePrompt;
 
-  try {
-    const { object } = await generateObject({
-      model,
-      schema: checklistSchema,
-      system: systemPrompt,
-      prompt: `기업명: ${companyName}
+  const generateArgs = {
+    schema: checklistSchema,
+    system: systemPrompt,
+    prompt: `기업명: ${companyName}
 분석 유형: ${typeLabel}
 
 재무 지표:
 ${JSON.stringify(metrics, null, 2)}`,
-    });
+  };
 
-    return Response.json(object);
+  // primary 시도 → 503 같은 일시 장애면 fallback 시도
+  let object: z.infer<typeof checklistSchema>;
+  try {
+    try {
+      const res = await generateObject({ model: primary, ...generateArgs });
+      object = res.object;
+    } catch (primaryErr) {
+      console.warn(
+        "[explain] primary 실패:",
+        (primaryErr as Error).message ?? primaryErr
+      );
+      if (!fallback) throw primaryErr;
+      console.log("[explain] Anthropic fallback 시도");
+      const res = await generateObject({ model: fallback, ...generateArgs });
+      object = res.object;
+    }
   } catch (error) {
     console.error("Explain error:", error);
-    return Response.json(
-      { error: "AI 분석에 실패했습니다.", detail: (error as Error).message },
-      { status: 500 }
-    );
+    const msg = (error as Error).message ?? "";
+    const friendly = msg.includes("high demand") || msg.includes("UNAVAILABLE")
+      ? "AI 서비스가 일시적으로 과부하 상태입니다. 1~2분 후 다시 시도해주세요."
+      : "AI 분석에 실패했습니다.";
+    return Response.json({ error: friendly, detail: msg }, { status: 500 });
   }
+
+  // AI 점수 결정론적 보정 — 상장사 한정 (ROE=효율성, 영업이익률=수익성)
+  // AI가 간혹 수치를 잘못 해석하여 비정상 점수를 주므로, 명확한 규칙으로 덮어쓴다.
+  if (type === "listed") {
+    const latestMetrics: Array<{ name: string; value: number | null }> =
+      metrics?.[0]?.metrics ?? [];
+    const findVal = (kw: string): number | null =>
+      latestMetrics.find((m) => m.name.includes(kw))?.value ?? null;
+
+    const roe = findVal("ROE");
+    if (roe !== null) {
+      let eff = 50;
+      if (roe >= 20) eff = 90;
+      else if (roe >= 15) eff = 75;
+      else if (roe >= 10) eff = 60;
+      else if (roe >= 5) eff = 45;
+      else if (roe >= 0) eff = 30;
+      else eff = 15;
+      object.categoryScores.efficiency = eff;
+    }
+
+    const opMargin = findVal("영업이익률");
+    if (opMargin !== null) {
+      let prof = 50;
+      if (opMargin >= 20) prof = 90;
+      else if (opMargin >= 10) prof = 75;
+      else if (opMargin >= 5) prof = 60;
+      else if (opMargin >= 0) prof = 40;
+      else prof = 15;
+      object.categoryScores.profitability = prof;
+    }
+  }
+
+  return Response.json(object);
 }
