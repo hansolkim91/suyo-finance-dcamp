@@ -106,6 +106,39 @@ function currentRatio(
   return (currentAssets / currentLiabilities) * 100;
 }
 
+// 당좌비율 = (유동자산 - 재고자산) / 유동부채 × 100
+// 유동비율보다 보수적인 단기 지급능력. 재고를 못 팔아도 갚을 수 있는지
+// inventory가 null이면 유동비율과 동일 (재고 0으로 가정)
+function quickRatio(
+  currentAssets: number | null,
+  inventory: number | null,
+  currentLiabilities: number | null
+): number | null {
+  if (
+    currentAssets === null ||
+    currentLiabilities === null ||
+    currentLiabilities === 0
+  )
+    return null;
+  const quickAssets = currentAssets - (inventory ?? 0);
+  return (quickAssets / currentLiabilities) * 100;
+}
+
+// 현금비율 = 현금및현금성자산 / 유동부채 × 100
+// 가장 보수적인 지급능력. 즉시 동원 가능한 현금만으로 단기 부채를 갚을 수 있는지
+function cashRatio(
+  cashBalance: number | null,
+  currentLiabilities: number | null
+): number | null {
+  if (
+    cashBalance === null ||
+    currentLiabilities === null ||
+    currentLiabilities === 0
+  )
+    return null;
+  return (cashBalance / currentLiabilities) * 100;
+}
+
 // 이자보상배율 = 영업이익 / 이자비용
 // 벌어서 이자를 몇 배 갚을 수 있는지. 1 미만이면 이자도 못 갚는 상태
 function interestCoverage(
@@ -246,6 +279,26 @@ export function calculateListedMetrics(
         unit: "%",
         description:
           "단기 채무 상환 능력. 200% 이상이면 양호, 100% 미만이면 위험합니다.",
+        category: "안정성",
+      },
+      {
+        name: "당좌비율",
+        value: quickRatio(
+          yearData.currentAssets,
+          yearData.inventory,
+          yearData.currentLiabilities
+        ),
+        unit: "%",
+        description:
+          "재고를 제외한 단기 지급능력. 100% 이상이면 양호, 재고 부담 큰 업종 평가에 유용합니다.",
+        category: "안정성",
+      },
+      {
+        name: "현금비율",
+        value: cashRatio(yearData.cashBalance, yearData.currentLiabilities),
+        unit: "%",
+        description:
+          "현금만으로 유동부채를 감당할 수 있는 비율. 20% 이상이면 양호합니다.",
         category: "안정성",
       },
       {

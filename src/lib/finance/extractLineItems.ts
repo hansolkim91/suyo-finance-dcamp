@@ -238,6 +238,15 @@ export function extractLineItemsFromText(text: string): FinancialData | null {
     "영업활동으로인한현금흐름",
     "영업활동현금흐름",
   ]);
+  // v3 신규: 재고자산 (당좌비율 계산용)
+  const inventory = findNumbersAfterKeyword(normalized, ["재고자산"]);
+  // v3 신규: 사용제한 현금 (비상장 현금 3분류용) — 흔히 누락되므로 키워드 다양화
+  const restrictedCash = findNumbersAfterKeyword(normalized, [
+    "사용제한예금",
+    "담보제공예금",
+    "장기금융상품\\(사용제한\\)",
+    "사용이제한된예금",
+  ]);
 
   const yearDataList: YearData[] = years.map((year, i) => ({
     year,
@@ -251,15 +260,23 @@ export function extractLineItemsFromText(text: string): FinancialData | null {
     depreciation: null,
     totalAssets: totalAssets[i] ?? null,
     currentAssets: currentAssets[i] ?? null,
+    inventory: inventory[i] ?? null,
     totalLiabilities: totalLiabilities[i] ?? null,
     currentLiabilities: currentLiabilities[i] ?? null,
     totalEquity: totalEquity[i] ?? null,
+    restrictedCash: restrictedCash[i] ?? null,
     operatingCashFlow: operatingCashFlows[i] ?? null,
     cashBalance: cashBalance[i] ?? null,
     operatingExpenses: operatingExpenses[i] ?? null,
   }));
 
-  return { companyName, years: yearDataList };
+  // 정규식 폴백은 종목코드·동종업체를 추정할 수 없음 → null/빈 배열
+  return {
+    companyName,
+    stockCode: null,
+    peerSuggestions: [],
+    years: yearDataList,
+  };
 }
 
 /**

@@ -7,12 +7,8 @@ import type { LanguageModel } from "ai";
 /**
  * PDF에서 재무 데이터를 AI로 추출한다.
  *
- * 전략 (v3):
- * - PDF 전체 텍스트에서 재무제표 3대 구간을 각각 찾아서 합침
- *   (손익계산서 + 재무상태표 + 현금흐름표)
- * - 이전 v1은 마커 1개만 찾아 60,000자 → 일부 재무표 누락
- * - v2는 전체 전달 → API 토큰 한도 초과
- * - v3은 3개 구간을 각각 찾아 합쳐서 ~150,000자 이내로 전달
+ * 구조: PDF 전체 텍스트 → 1회 generateObject 호출 → 통합 스키마 결과 반환.
+ * 텍스트 자르기/구간 추출 없이 전체를 그대로 AI에게 전달 (Gemini Tier 1 토큰 한도 충분).
  */
 
 function getModel(): LanguageModel {
@@ -36,12 +32,23 @@ function getModel(): LanguageModel {
   );
 }
 
-const EXTRACTION_PROMPT = `이 텍스트는 한국 기업의 재무제표(사업보고서/감사보고서)에서 추출한 핵심 구간입니다.
-손익계산서, 재무상태표, 현금흐름표에서 재무 항목을 추출해주세요.
+const EXTRACTION_PROMPT = `이 텍스트는 한국 기업의 사업보고서/감사보고서 전체입니다.
+다음 항목을 추출해주세요.
 
-추출 대상:
+[기업 정보]
+- companyName: 기업명
+- stockCode: 6자리 종목코드 (예: '005930'). KOSPI/KOSDAQ 상장사만. 비상장사면 null.
+- peerSuggestions: 이 기업과 동종업종(같은 산업/사업영역)의 한국 상장사 3개 추천.
+  반드시 지킬 것:
+    · 한국 상장사만 (해외 회사 절대 제외 — Apple, Intel, Sony 등 X)
+    · 시가총액 비슷한 수준 (대기업이면 대기업, 중견이면 중견)
+    · 본 회사 자체는 제외
+    · 각 항목은 { name: 회사명, code: 6자리 종목코드 }
+    · 비상장사 분석이면 빈 배열 [] 반환
+
 [손익계산서] 매출액, 매출원가, 매출총이익, 영업이익, 당기순이익, 이자비용, 감가상각비
-[재무상태표] 자산총계, 유동자산, 부채총계, 유동부채, 자본총계
+[재무상태표] 자산총계, 유동자산, 재고자산, 부채총계, 유동부채, 자본총계, 사용제한 현금
+  - 사용제한 현금은 "사용제한예금", "담보제공예금", "장기금융상품(사용제한)" 등의 표기. 없으면 null.
 [현금흐름표] 영업활동현금흐름, 기말현금
 [기타] 판매비와관리비, 영업비용(판관비+매출원가)
 
@@ -49,8 +56,8 @@ const EXTRACTION_PROMPT = `이 텍스트는 한국 기업의 재무제표(사업
 - 금액은 반드시 "원" 단위로 통일 (백만원이면 ×1,000,000, 천원이면 ×1,000)
 - 최근 2~3개년 데이터 추출 (최신 연도 먼저)
 - 찾을 수 없는 항목은 null
-- 비용 항목(매출원가, 판관비 등)은 양수로 기입`;
-
+- 비용 항목(매출원가, 판관비 등)은 양수로 기입
+- 목차/요약이 아닌 실제 재무제표 표 본문에서 숫자를 추출`;
 
 export async function extractFinancialDataFromPDF(
   pdfBuffer: Buffer
@@ -58,134 +65,15 @@ export async function extractFinancialDataFromPDF(
   const model = getModel();
 
   const fullText = await extractTextFromPdfBuffer(pdfBuffer);
-  const financialText = extractFinancialSections(fullText);
 
-  console.log(
-    `전체 ${fullText.length}자 → 재무 핵심 ${financialText.length}자 전달`
-  );
+  console.log(`PDF 전체 ${fullText.length}자 → AI 1회 호출`);
 
   const { object } = await generateObject({
     model,
     schema: financialDataSchema,
-    prompt: `${EXTRACTION_PROMPT}\n\n---\n${financialText}`,
+    prompt: `${EXTRACTION_PROMPT}\n\n---\n${fullText}`,
   });
   return object;
-}
-
-/**
- * PDF 전체 텍스트에서 재무제표 3대 구간을 각각 찾아 합친다.
- *
- * 왜 3개 구간을 따로 찾는가:
- * - DART 사업보고서에서 손익계산서, 재무상태표, 현금흐름표는
- *   각각 다른 위치에 있을 수 있음
- * - 마커 1개만 찾으면 뒤쪽 재무표가 잘릴 수 있음
- * - 3개 구간을 각각 찾아서 합치면 누락 없이 모든 재무 데이터 확보
- *
- * 각 구간당 최대 40,000자 × 3 = 최대 120,000자 ≈ 60,000 토큰
- * → Gemini 무료 한도(250,000 토큰/분) 이내
- */
-function extractFinancialSections(fullText: string): string {
-  const SECTION_SIZE = 40000;
-  const sections: string[] = [];
-  const usedRanges: [number, number][] = [];
-
-  // 3대 재무제표 마커 그룹
-  const markerGroups = [
-    {
-      name: "손익계산서",
-      markers: [
-        "포 괄 손 익 계 산 서",
-        "포괄손익계산서",
-        "손 익 계 산 서",
-        "손익계산서",
-      ],
-    },
-    {
-      name: "재무상태표",
-      markers: [
-        "재 무 상 태 표",
-        "재무상태표",
-        "연 결 재 무 상 태 표",
-        "연결재무상태표",
-      ],
-    },
-    {
-      name: "현금흐름표",
-      markers: [
-        "현 금 흐 름 표",
-        "현금흐름표",
-        "연 결 현 금 흐 름 표",
-        "연결현금흐름표",
-      ],
-    },
-  ];
-
-  // "재무에 관한 사항" 전체 구간도 폴백으로 사용
-  const overallMarkers = [
-    "재 무 에 관 한 사 항",
-    "재무에 관한 사항",
-    "재무에관한사항",
-  ];
-
-  for (const group of markerGroups) {
-    let found = false;
-    for (const marker of group.markers) {
-      const idx = fullText.indexOf(marker);
-      if (idx !== -1 && !isOverlapping(idx, idx + SECTION_SIZE, usedRanges)) {
-        const end = Math.min(idx + SECTION_SIZE, fullText.length);
-        sections.push(
-          `\n=== ${group.name} 구간 ===\n${fullText.slice(idx, end)}`
-        );
-        usedRanges.push([idx, end]);
-        console.log(
-          `${group.name} 마커 발견: "${marker}" (위치: ${idx}/${fullText.length})`
-        );
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      console.log(`${group.name} 마커 없음`);
-    }
-  }
-
-  // 아무 구간도 못 찾았으면 "재무에 관한 사항"부터 큰 구간으로
-  if (sections.length === 0) {
-    for (const marker of overallMarkers) {
-      const idx = fullText.indexOf(marker);
-      if (idx !== -1) {
-        const bigSize = Math.min(120000, fullText.length - idx);
-        sections.push(fullText.slice(idx, idx + bigSize));
-        console.log(
-          `전체 재무 마커로 폴백: "${marker}" (위치: ${idx}, ${bigSize}자)`
-        );
-        break;
-      }
-    }
-  }
-
-  // 그래도 못 찾으면 뒤쪽 40%부터
-  if (sections.length === 0) {
-    const startIdx = Math.floor(fullText.length * 0.4);
-    const fallbackSize = Math.min(120000, fullText.length - startIdx);
-    sections.push(fullText.slice(startIdx, startIdx + fallbackSize));
-    console.log(
-      `재무 마커 전혀 없음 → 텍스트 40% 지점(${startIdx})부터 ${fallbackSize}자 사용`
-    );
-  }
-
-  return sections.join("\n\n");
-}
-
-function isOverlapping(
-  start: number,
-  end: number,
-  ranges: [number, number][]
-): boolean {
-  for (const [rStart, rEnd] of ranges) {
-    if (start < rEnd && end > rStart) return true;
-  }
-  return false;
 }
 
 /**
