@@ -1,6 +1,5 @@
 {
   "permissions": {
-    "defaultMode": "acceptEdits",
     "allow": [
       "Read",
       "Edit",
@@ -78,7 +77,13 @@
       "Bash(rm -f *)",
       "Bash(unzip *)",
       "Bash(tar *)",
-      "Bash(code *)"
+      "Bash(code *)",
+      "Bash(gh auth *)",
+      "Bash(gh repo *)",
+      "Bash(vercel whoami *)",
+      "Bash(vercel link *)",
+      "Bash(vercel ls *)",
+      "Bash(vercel alias *)"
     ],
     "deny": [
       "Bash(git push*)",
@@ -93,6 +98,7 @@
       "Bash(sudo *)",
       "Bash(format *)",
       "Bash(del /f /s /q *)"
-    ]
+    ],
+    "defaultMode": "acceptEdits"
   }
 }
