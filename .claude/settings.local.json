@@ -84,7 +84,8 @@
       "Bash(vercel link *)",
       "Bash(vercel ls *)",
       "Bash(vercel alias *)",
-      "Bash(vercel logs *)"
+      "Bash(vercel logs *)",
+      "Bash(tee /tmp/dev.log)"
     ],
     "deny": [
       "Bash(git push*)",

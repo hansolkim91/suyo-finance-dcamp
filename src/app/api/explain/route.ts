@@ -3,49 +3,56 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { generateObject } from "ai";
 import { z } from "zod";
 import type { LanguageModel } from "ai";
+import {
+  scoreListed,
+  scorePrivate,
+  calcOverall,
+  checklistStatus,
+  type CategoryScores,
+} from "@/lib/finance/scoring";
+import type { ListedMetrics } from "@/lib/finance/metrics/listed";
+import type { PrivateMetrics, BurnYoY } from "@/lib/finance/metrics/private";
 
 export const runtime = "nodejs";
 // Fluid Compute 기본 허용치 — AI 응답(Gemini + Anthropic fallback + 길어진 insight)으로 60초 초과 가능
 export const maxDuration = 300;
 
 /**
- * 체크리스트 분석 API (v2 — 대시보드용)
+ * 체크리스트 분석 API (v5 — 결정론 점수 분리)
  *
- * v1 대비 변경:
- * - categoryScores 추가: 레이더 차트에 사용할 카테고리별 0~100 점수
- * - overallScore 추가: 종합 점수 (반원 게이지용)
- * - insight 추가: AI 종합 의견 (별도 하이라이트 박스용)
+ * v4 → v5 변경:
+ * - AI 호출 스키마에서 categoryScores, overallScore, checklist[].status 제거
+ * - 점수 산정·임계값 매핑은 모두 lib/finance/scoring.ts (결정론)
+ * - AI는 summary, insight, checklist[].{category,keyItems,source,analysis}만 생성
+ * - 라우트가 metrics → scoring → 응답 조립
  *
- * 왜: 리서치 결과, 숫자+차트+AI 코멘트가 분리되어야 사용자가 읽기 쉬움
+ * 왜:
+ * - 동일 입력 → 동일 점수 보장 (LLM은 같은 입력에도 점수 흔들림)
+ * - 출력 토큰 ↓ → 비용·응답시간 ↓
+ * - 임계값 단일 출처 (이전엔 프롬프트 + 라우트 override 두 곳에 중복)
+ *
+ * 클라이언트는 기존 응답 형식(`{categoryScores, overallScore, checklist[i].status, ...}`)을
+ * 그대로 사용하므로 ResultView는 변경 불필요.
  */
 
-const checklistItemSchema = z.object({
+// ───────── AI 호출용 스키마 (자연어만) ─────────
+
+const checklistItemAiSchema = z.object({
   category: z
     .string()
     .describe("분석 구분 (예: 사업모델, 매출·이익 흐름 등)"),
-  keyItems: z
-    .string()
-    .describe("이 구분에서 확인한 핵심 항목 나열"),
+  keyItems: z.string().describe("이 구분에서 확인한 핵심 항목 나열"),
   source: z
     .string()
     .describe("데이터 출처 (예: 포괄손익계산서, 재무상태표 등)"),
   analysis: z
     .string()
-    .describe("AI의 상세 분석 결과 (최소 5문장, 구체적 수치 인용 필수, 원인·의미·전망 모두 포함)"),
-  status: z
-    .enum(["good", "neutral", "warning"])
-    .describe("종합 판단: good=양호, neutral=보통, warning=주의"),
+    .describe(
+      "AI의 상세 분석 결과 (최소 5문장, 구체적 수치 인용 필수, 원인·의미·전망 모두 포함)"
+    ),
 });
 
-const categoryScoresSchema = z.object({
-  profitability: z.number().describe("수익성 점수, 0~100 정수"),
-  stability: z.number().describe("안정성 점수, 0~100 정수"),
-  growth: z.number().describe("성장성 점수, 0~100 정수"),
-  efficiency: z.number().describe("효율성 점수, 0~100 정수"),
-  cashflow: z.number().describe("현금창출력 점수, 0~100 정수"),
-});
-
-const checklistSchema = z.object({
+const checklistAiSchema = z.object({
   companyName: z.string(),
   summary: z
     .string()
@@ -55,12 +62,24 @@ const checklistSchema = z.object({
     .describe(
       "AI 종합 의견: 최소 10문장 이상, 구체적 수치 인용 필수. 한 줄 평가 + 강점 2~3가지 + 약점·리스크 2~3가지 + 동종업계 대비 포지션 + ACTION 제안 3개로 구조화"
     ),
-  overallScore: z
-    .number()
-    .describe("종합 재무 건전성 점수, 0~100 정수"),
-  categoryScores: categoryScoresSchema,
-  checklist: z.array(checklistItemSchema),
+  checklist: z.array(checklistItemAiSchema),
 });
+
+type ChecklistAi = z.infer<typeof checklistAiSchema>;
+
+// ───────── 클라이언트 응답 스키마 (점수 포함) ─────────
+
+type ChecklistItem = ChecklistAi["checklist"][number] & {
+  status: "good" | "neutral" | "warning";
+};
+
+type ChecklistResponse = ChecklistAi & {
+  overallScore: number;
+  categoryScores: CategoryScores;
+  checklist: ChecklistItem[];
+};
+
+// ───────── 모델 ─────────
 
 /**
  * explain은 Gemini 우선 사용, Gemini 일시 장애(503) 시 Anthropic 폴백.
@@ -68,7 +87,10 @@ const checklistSchema = z.object({
  * 왜: analyze에서 Anthropic 토큰 소모 → Gemini로 분산이 기본이지만,
  * Gemini 503(과부하)도 종종 발생하므로 Anthropic을 fallback으로 활용.
  */
-function getModels(): { primary: LanguageModel | null; fallback: LanguageModel | null } {
+function getModels(): {
+  primary: LanguageModel | null;
+  fallback: LanguageModel | null;
+} {
   const geminiKey = process.env.GEMINI_API_KEY;
   const anthropicKey =
     process.env.ANTHROPIC_API_KEY || process.env.AI_GATEWAY_API_KEY;
@@ -79,7 +101,6 @@ function getModels(): { primary: LanguageModel | null; fallback: LanguageModel |
       ? createAnthropic({ apiKey: anthropicKey })("claude-sonnet-4-6")
       : null;
 
-  // primary가 Gemini면 Anthropic을 fallback, 둘 다 같은 공급자면 fallback 없음
   const fallback =
     geminiKey && anthropicKey
       ? createAnthropic({ apiKey: anthropicKey })("claude-sonnet-4-6")
@@ -88,19 +109,34 @@ function getModels(): { primary: LanguageModel | null; fallback: LanguageModel |
   return { primary, fallback };
 }
 
-export async function POST(request: Request) {
-  const { primary, fallback } = getModels();
-  if (!primary) {
-    return Response.json(
-      { error: "AI API 키가 설정되지 않았습니다." },
-      { status: 500 }
-    );
-  }
+// ───────── 비상장 BurnYoY 추정 (라우트 즉석 계산) ─────────
 
-  const { metrics, companyName, type } = await request.json();
-  const typeLabel = type === "listed" ? "상장사" : "비상장 스타트업";
+/**
+ * AnalysisPanel은 metricsPerYear를 그대로 보낸다.
+ * 비상장 metricsPerYear[0]=최신, [1]=전년 형태일 때 Gross Burn Rate를 비교해 BurnYoY 추정.
+ *
+ * 왜 라우트에서 즉석 계산하나:
+ * - calcBurnYoY는 YearData 입력이지만 라우트는 PrivateMetrics만 받음
+ * - 굳이 클라에서 BurnYoY를 별도 전송하게 만들기보다, "Gross Burn Rate"는 PrivateMetrics에 이미 있으므로 그것으로 yoy 계산
+ * - 데이터 부족이면 null → scorePrivate가 efficiency 50으로 처리 (안전 fallback)
+ */
+function inferBurnYoY(metrics: PrivateMetrics[]): BurnYoY | null {
+  if (metrics.length < 2) return null;
+  const latest = metrics[0]?.metrics ?? [];
+  const prior = metrics[1]?.metrics ?? [];
+  const latestBurn =
+    latest.find((m) => m.name === "Gross Burn Rate")?.value ?? null;
+  const priorBurn =
+    prior.find((m) => m.name === "Gross Burn Rate")?.value ?? null;
+  if (latestBurn === null || priorBurn === null || priorBurn === 0) return null;
+  const yoy = ((latestBurn - priorBurn) / priorBurn) * 100;
+  // netBurn YoY는 음수가 섞여 부호 처리 복잡 → MVP는 grossBurn만 사용
+  return { grossBurnYoY: yoy, netBurnYoY: null };
+}
 
-  const listedPrompt = `당신은 한국 상장사 재무분석 전문가입니다.
+// ───────── 프롬프트 (점수 규칙 섹션 제거됨) ─────────
+
+const LISTED_PROMPT = `당신은 한국 상장사 재무분석 전문가입니다.
 주어진 재무 지표를 바탕으로 분석하세요.
 
 [체크리스트 5개 구분] (반드시 이 순서로):
@@ -109,26 +145,6 @@ export async function POST(request: Request) {
 3. 재무건전성 — keyItems: 부채비율, 현금·현금성자산, 이자보상배율 / source: 재무상태표, 현금흐름표
 4. 리스크 신호 — keyItems: 자본잠식, 감자·증자·주식소각, 감사의견 / source: 재무상태표, 감사보고서 강조사항
 5. 비교·평가 — keyItems: 업종 평균 대비 성장성·수익성·가치지표 / source: 동일 업종 지표 비교
-
-[카테고리별 점수 기준] (0~100):
-- 수익성: 영업이익률 20%이상=90점, 10~20%=70점, 5~10%=50점, 0~5%=30점, 적자=10점
-- 안정성: 부채비율 50%이하=90점, 100%이하=70점, 200%이하=50점, 200%초과=30점
-- 성장성: 매출성장률 20%이상=90점, 10~20%=70점, 0~10%=50점, 역성장=20점
-- 효율성: ROE 20%이상=90점, 15~20%=70점, 10~15%=50점, 10%미만=30점
-- 현금창출력 (중요 — metrics에 영업CF가 직접 없으면 아래 간접 지표로 판단):
-  · 영업이익률 ≥ 15% 이고 부채비율 ≤ 100% → 90점 (우량한 현금창출 능력)
-  · 영업이익률 ≥ 10% → 75점
-  · 영업이익률 ≥ 5% → 60점
-  · 영업이익률 > 0% (흑자) → 55점
-  · 영업이익 적자 → 30점
-  · 판단 불가 (핵심 데이터 null) → 50점
-
-[종합 점수] = 5개 카테고리 점수의 가중 평균 (수익성 25%, 안정성 25%, 성장성 20%, 효율성 15%, 현금창출력 15%)
-
-[중요 — 점수 부여 규칙]:
-- 데이터가 전혀 없는 카테고리는 50점 (0점·20점 금지)
-- 영업이익률이 양호한 우량 상장사는 현금창출력도 자동 70~90점 부여 (0점·20점은 명백한 적자·자본잠식 때만)
-- 0점은 "확실히 나쁜" 경우에만 부여
 
 [사업모델 분석 가이드]:
 - 이 기업이 어떤 제품/서비스로 돈을 버는지 추정
@@ -151,9 +167,10 @@ export async function POST(request: Request) {
 
 규칙:
 - 한국어, 재무 초보자도 이해 가능하되 재무 용어는 그대로 (ROE, EBITDA 등)
-- 짧은 요약은 금지 — 한솔 사용자는 KICPA·VC 경력자로 깊이 있는 분석을 기대`;
+- 짧은 요약은 금지 — 한솔 사용자는 KICPA·VC 경력자로 깊이 있는 분석을 기대
+- 점수·합계는 시스템이 별도 계산하므로 산정하지 말 것 (텍스트 분석에만 집중)`;
 
-  const privatePrompt = `당신은 스타트업 투자 심사를 15년 이상 해온 시니어 VC 심사역입니다.
+const PRIVATE_PROMPT = `당신은 스타트업 투자 심사를 15년 이상 해온 시니어 VC 심사역입니다.
 상장사 기준의 "이익률·ROE"가 아니라, 스타트업 관점에서 "현금·Runway·생존성·성장 효율"을 판단합니다.
 이 회사가 당신이 검토 중인 Series A~C 투자 건이라고 가정하고, 실사 메모를 작성하는 톤으로 분석하세요.
 
@@ -163,35 +180,6 @@ export async function POST(request: Request) {
 3. 손익 구조 & 성장 — keyItems: BEP 달성률, 매출 성장률, 매출총이익률 / source: 포괄손익계산서
 4. 자본·차입 구조 — keyItems: 자본잠식 여부, 부채비율, 현금 vs 차입 비중 / source: 재무상태표
 5. 리스크 & 투자 포인트 — keyItems: 생존 리스크·성장 레버·투자 결정 요인 / source: 종합
-
-[VC 점수 루브릭 — 반드시 이 기준 준수]:
-- 안정성 (= Runway 기준):
-  · Runway ≥ 18개월 = 90점
-  · 12~18개월 = 70점
-  · 6~12개월 = 40점
-  · < 6개월 = 15점
-  · 흑자 = 95점
-- 성장성 (매출 YoY):
-  · +50% 이상 = 95점 (하이퍼 그로스)
-  · +20~50% = 80점
-  · +5~20% = 60점
-  · 0~5% = 40점
-  · 역성장 = 20점
-- 수익성 (매출총이익률 + 영업이익률):
-  · 매출총이익률 60%↑ 또는 영업이익률 10%↑ = 85점
-  · 매출총이익률 30~60% = 60점
-  · 적자이지만 GM 양수 = 40점
-  · GM 음수 = 15점
-- 효율성 (Burn 대비 성장):
-  · Burn YoY 감소 + 매출 성장 = 90점
-  · Burn YoY +20% 이하 + 매출 성장 = 70점
-  · Burn YoY +50% 이상 = 30점
-  · 데이터 부족 = 50점
-- 현금창출력 (영업CF + 현금잔고):
-  · 영업CF 양수 = 80점
-  · 영업CF 음수이지만 현금잔고 풍부(≥ Burn×18개월) = 55점
-  · 영업CF 음수 + 현금잔고 부족 = 25점
-  · 데이터 없음 = 50점
 
 [analysis 작성 규칙 — 매우 중요]:
 - 각 카테고리의 analysis는 **최소 5문장 이상**, 구체적 숫자 인용 필수
@@ -210,12 +198,26 @@ export async function POST(request: Request) {
 규칙:
 - 한국어, 재무·VC 용어는 그대로 사용 (ARR, MRR, Runway, Burn, BEP 등)
 - insight는 반드시 10문장 이상 — 짧은 요약은 금지
-- 모든 점수·판단 뒤에 "왜" 설명`;
+- 모든 판단 뒤에 "왜" 설명
+- 점수·합계는 시스템이 별도 계산하므로 산정하지 말 것 (텍스트 분석에만 집중)`;
 
-  const systemPrompt = type === "listed" ? listedPrompt : privatePrompt;
+// ───────── 라우트 본문 ─────────
+
+export async function POST(request: Request) {
+  const { primary, fallback } = getModels();
+  if (!primary) {
+    return Response.json(
+      { error: "AI API 키가 설정되지 않았습니다." },
+      { status: 500 }
+    );
+  }
+
+  const { metrics, companyName, type } = await request.json();
+  const typeLabel = type === "listed" ? "상장사" : "비상장 스타트업";
+  const systemPrompt = type === "listed" ? LISTED_PROMPT : PRIVATE_PROMPT;
 
   const generateArgs = {
-    schema: checklistSchema,
+    schema: checklistAiSchema,
     system: systemPrompt,
     prompt: `기업명: ${companyName}
 분석 유형: ${typeLabel}
@@ -224,12 +226,12 @@ export async function POST(request: Request) {
 ${JSON.stringify(metrics, null, 2)}`,
   };
 
-  // primary 시도 → 503 같은 일시 장애면 fallback 시도
-  let object: z.infer<typeof checklistSchema>;
+  // ── AI 호출 (자연어만) ──
+  let aiObject: ChecklistAi;
   try {
     try {
       const res = await generateObject({ model: primary, ...generateArgs });
-      object = res.object;
+      aiObject = res.object;
     } catch (primaryErr) {
       console.warn(
         "[explain] primary 실패:",
@@ -238,48 +240,40 @@ ${JSON.stringify(metrics, null, 2)}`,
       if (!fallback) throw primaryErr;
       console.log("[explain] Anthropic fallback 시도");
       const res = await generateObject({ model: fallback, ...generateArgs });
-      object = res.object;
+      aiObject = res.object;
     }
   } catch (error) {
     console.error("Explain error:", error);
     const msg = (error as Error).message ?? "";
-    const friendly = msg.includes("high demand") || msg.includes("UNAVAILABLE")
-      ? "AI 서비스가 일시적으로 과부하 상태입니다. 1~2분 후 다시 시도해주세요."
-      : "AI 분석에 실패했습니다.";
+    const friendly =
+      msg.includes("high demand") || msg.includes("UNAVAILABLE")
+        ? "AI 서비스가 일시적으로 과부하 상태입니다. 1~2분 후 다시 시도해주세요."
+        : "AI 분석에 실패했습니다.";
     return Response.json({ error: friendly, detail: msg }, { status: 500 });
   }
 
-  // AI 점수 결정론적 보정 — 상장사 한정 (ROE=효율성, 영업이익률=수익성)
-  // AI가 간혹 수치를 잘못 해석하여 비정상 점수를 주므로, 명확한 규칙으로 덮어쓴다.
-  if (type === "listed") {
-    const latestMetrics: Array<{ name: string; value: number | null }> =
-      metrics?.[0]?.metrics ?? [];
-    const findVal = (kw: string): number | null =>
-      latestMetrics.find((m) => m.name.includes(kw))?.value ?? null;
+  // ── 결정론 점수 계산 ──
+  const categoryScores: CategoryScores =
+    type === "listed"
+      ? scoreListed(metrics as ListedMetrics[])
+      : scorePrivate(
+          metrics as PrivateMetrics[],
+          inferBurnYoY(metrics as PrivateMetrics[])
+        );
 
-    const roe = findVal("ROE");
-    if (roe !== null) {
-      let eff = 50;
-      if (roe >= 20) eff = 90;
-      else if (roe >= 15) eff = 75;
-      else if (roe >= 10) eff = 60;
-      else if (roe >= 5) eff = 45;
-      else if (roe >= 0) eff = 30;
-      else eff = 15;
-      object.categoryScores.efficiency = eff;
-    }
+  const overallScore = calcOverall(categoryScores, type);
 
-    const opMargin = findVal("영업이익률");
-    if (opMargin !== null) {
-      let prof = 50;
-      if (opMargin >= 20) prof = 90;
-      else if (opMargin >= 10) prof = 75;
-      else if (opMargin >= 5) prof = 60;
-      else if (opMargin >= 0) prof = 40;
-      else prof = 15;
-      object.categoryScores.profitability = prof;
-    }
-  }
+  const enrichedChecklist = aiObject.checklist.map((item) => ({
+    ...item,
+    status: checklistStatus(item.category, categoryScores, type),
+  }));
 
-  return Response.json(object);
+  const response: ChecklistResponse = {
+    ...aiObject,
+    overallScore,
+    categoryScores,
+    checklist: enrichedChecklist,
+  };
+
+  return Response.json(response);
 }
