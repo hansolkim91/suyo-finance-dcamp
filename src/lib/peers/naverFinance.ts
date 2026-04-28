@@ -30,15 +30,21 @@ function parseNumber(raw: string | undefined): number | null {
 }
 
 /**
- * 네이버 시가총액 포맷 "872조 3,477" → 원 단위 숫자.
+ * 네이버 시가총액 포맷 "1,297조 8,738" → 원 단위 숫자.
  * "조"와 "억(쉼표 숫자)"을 각각 파싱하여 합산 후 억 단위 × 10^8.
+ *
+ * 1000조를 넘는 회사(삼성전자 등)는 "1,297조"처럼 천단위 콤마가 들어가므로
+ * 정규식에 콤마도 포함해서 잡아야 한다. 이전엔 \d+ 만이라 "1,297조"에서
+ * "297조"만 잡혀 1조 단위가 통째로 누락되는 버그가 있었음.
  */
 function parseMarketCap(raw: string | undefined): number | null {
   if (!raw) return null;
   const clean = raw.replace(/\s+/g, " ").trim();
-  const joMatch = clean.match(/(\d+)\s*조/);
-  const jo = joMatch ? parseInt(joMatch[1], 10) : 0;
-  const after = joMatch ? clean.slice(joMatch.index! + joMatch[0].length) : clean;
+  const joMatch = clean.match(/([\d,]+)\s*조/);
+  const jo = joMatch ? parseInt(joMatch[1].replace(/,/g, ""), 10) : 0;
+  const after = joMatch
+    ? clean.slice(joMatch.index! + joMatch[0].length)
+    : clean;
   const eokDigits = after.replace(/[^\d,]/g, "").replace(/,/g, "");
   const eok = eokDigits ? parseInt(eokDigits, 10) : 0;
   const totalEok = jo * 10000 + eok;
