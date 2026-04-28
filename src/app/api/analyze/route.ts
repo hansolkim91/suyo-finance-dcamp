@@ -58,7 +58,7 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            "스캔본/이미지 PDF는 지원하지 않습니다. DART·전자공시에서 다운로드한 텍스트 기반 PDF를 업로드해주세요.",
+            "PDF에서 텍스트와 이미지(OCR) 모두 인식하지 못했습니다. PDF 품질을 확인하거나 다른 형식으로 다시 시도해주세요.",
           detail: message,
         },
         { status: 400 }
@@ -72,6 +72,20 @@ export async function POST(request: Request) {
           detail: message,
         },
         { status: 503 }
+      );
+    }
+    if (
+      message.includes("too many parameters") ||
+      message.includes("context length") ||
+      /token (limit|exceed)/i.test(message)
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "PDF가 너무 크거나 AI 모델 한도를 초과했습니다. 페이지 수가 적은 요약본으로 시도해주세요.",
+          detail: message,
+        },
+        { status: 413 }
       );
     }
 

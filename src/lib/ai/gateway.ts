@@ -1,11 +1,101 @@
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { generateObject } from "ai";
-import { financialDataSchema, type FinancialData } from "../finance/types";
+import { z } from "zod";
+import {
+  financialDataSchema,
+  type FinancialData,
+  type YearData,
+} from "../finance/types";
 import type { LanguageModel } from "ai";
 
 // 스캔/이미지 PDF 감지 임계값 — 텍스트가 이 길이 미만이면 Vision(OCR) 경로로 분기
 const MIN_TEXT_LENGTH_FOR_ANALYSIS = 500;
+
+/**
+ * Vision(OCR) 경로 전용 슬림 스키마.
+ *
+ * 왜 슬림하게 만드는가:
+ * - financialDataSchema는 nullable union이 19개 → Anthropic 한도(16) 초과로 invalid_request 즉사.
+ * - Gemini가 503 일시 장애일 때 Anthropic 폴백이 영구 차단되는 문제 차단.
+ * - Vision OCR로 핵심 14개만 추출하고, 나머지는 매핑 시 null로 채움.
+ *
+ * 제외 항목 (스캔본은 어차피 정밀도 낮음 + 비상장 점수에 필수 아님):
+ *   interestExpense, depreciation, restrictedCash, operatingExpenses
+ *   stockCode (Vision 대상은 비상장 스캔본 가정 → 항상 null)
+ *   peerSuggestions (스캔본에서 동종업체 추천은 무리 → 빈 배열)
+ */
+const visionYearSchema = z.object({
+  year: z.string().describe("회계연도 (예: '2024')"),
+  revenue: z.number().nullable().describe("매출액"),
+  costOfGoodsSold: z.number().nullable().describe("매출원가"),
+  grossProfit: z.number().nullable().describe("매출총이익"),
+  operatingProfit: z.number().nullable().describe("영업이익"),
+  netIncome: z.number().nullable().describe("당기순이익"),
+  totalAssets: z.number().nullable().describe("자산총계"),
+  currentAssets: z.number().nullable().describe("유동자산"),
+  inventory: z.number().nullable().describe("재고자산"),
+  totalLiabilities: z.number().nullable().describe("부채총계"),
+  currentLiabilities: z.number().nullable().describe("유동부채"),
+  totalEquity: z.number().nullable().describe("자본총계"),
+  cashBalance: z.number().nullable().describe("현금 및 현금성자산 (기말)"),
+  operatingCashFlow: z.number().nullable().describe("영업활동 현금흐름"),
+  sgaExpenses: z.number().nullable().describe("판매비와관리비"),
+});
+
+const visionFinancialSchema = z.object({
+  companyName: z.string().describe("기업명"),
+  years: z.array(visionYearSchema).min(1).describe("연도별 재무 데이터"),
+});
+
+type VisionYear = z.infer<typeof visionYearSchema>;
+
+/** Vision 슬림 결과 → 전체 FinancialData 형태로 변환. 누락 필드는 null. */
+function visionToFinancialData(
+  vision: z.infer<typeof visionFinancialSchema>
+): FinancialData {
+  const years: YearData[] = vision.years.map((y: VisionYear) => ({
+    year: y.year,
+    revenue: y.revenue,
+    costOfGoodsSold: y.costOfGoodsSold,
+    grossProfit: y.grossProfit,
+    operatingProfit: y.operatingProfit,
+    netIncome: y.netIncome,
+    interestExpense: null,
+    depreciation: null,
+    totalAssets: y.totalAssets,
+    currentAssets: y.currentAssets,
+    inventory: y.inventory,
+    totalLiabilities: y.totalLiabilities,
+    currentLiabilities: y.currentLiabilities,
+    totalEquity: y.totalEquity,
+    restrictedCash: null,
+    operatingCashFlow: y.operatingCashFlow,
+    cashBalance: y.cashBalance,
+    operatingExpenses:
+      y.costOfGoodsSold !== null && y.sgaExpenses !== null
+        ? y.costOfGoodsSold + y.sgaExpenses
+        : null,
+    sgaExpenses: y.sgaExpenses,
+  }));
+
+  return {
+    companyName: vision.companyName,
+    stockCode: null,
+    peerSuggestions: [],
+    years,
+  };
+}
+
+/**
+ * 일시 장애·스키마 한도·토큰 한도 같은 환경 문제는 ScannedPdfError로 wrap하지 않는다.
+ * (원본 에러 메시지를 그대로 보여줘야 사용자/개발자가 진짜 원인을 안다.)
+ */
+function isEnvironmentalError(message: string): boolean {
+  return /high demand|UNAVAILABLE|rate.?limit|429|503|too many parameters|context length|token (limit|exceed)/i.test(
+    message
+  );
+}
 
 /**
  * 스캔본/이미지 PDF도 분석할 수 있도록, AI에 PDF를 직접 전송(멀티모달)하여
@@ -107,22 +197,38 @@ export async function extractFinancialDataFromPDF(
   }
 
   // 스캔본/이미지 PDF → Vision 경로 (AI가 PDF 파일 자체를 OCR)
+  // 슬림 스키마(visionFinancialSchema)를 사용해 Anthropic 한도(16 union) 회피.
   console.log(
-    `PDF 텍스트 ${fullText.trim().length}자만 추출됨 → Vision(OCR) 경로 전환`
+    `PDF 텍스트 ${fullText.trim().length}자만 추출됨 → Vision(OCR) 슬림 스키마 경로`
   );
+  const visionPrompt = `이 PDF는 한국 비상장사의 감사보고서/재무제표(스캔본 가능)입니다. PDF 페이지를 OCR하여 다음을 추출하세요.
+
+[기업 정보]
+- companyName: 기업명 (정확히 한글 표기, "(주)" 포함 가능)
+
+[연도별 재무 (years 배열)]
+- 최근 2~3개년 데이터, 각 연도별로 다음 항목 추출
+- year: 회계연도 (예: '2024')
+- 손익계산서: revenue(매출액), costOfGoodsSold(매출원가), grossProfit(매출총이익), operatingProfit(영업이익), netIncome(당기순이익), sgaExpenses(판매비와관리비)
+- 재무상태표: totalAssets(자산총계), currentAssets(유동자산), inventory(재고자산), totalLiabilities(부채총계), currentLiabilities(유동부채), totalEquity(자본총계), cashBalance(현금 및 현금성자산)
+- 현금흐름표: operatingCashFlow(영업활동 현금흐름)
+
+규칙:
+- 금액은 반드시 "원" 단위로 통일 (백만원이면 ×1,000,000, 천원이면 ×1,000)
+- 비용 항목(매출원가, 판관비)은 양수로 기입
+- 찾을 수 없는 항목은 null
+- 최신 연도 먼저`;
+
   try {
-    return await withFallback(primary, fallback, (model) =>
+    const visionData = await withFallback(primary, fallback, (model) =>
       generateObject({
         model,
-        schema: financialDataSchema,
+        schema: visionFinancialSchema,
         messages: [
           {
             role: "user",
             content: [
-              {
-                type: "text",
-                text: `${EXTRACTION_PROMPT}\n\n위 규칙에 따라 첨부된 PDF에서 재무 데이터를 추출하세요. PDF의 텍스트 레이어가 없을 수 있으니 이미지 페이지를 OCR하여 숫자를 읽어내세요.`,
-              },
+              { type: "text", text: visionPrompt },
               {
                 type: "file",
                 data: pdfBuffer,
@@ -133,8 +239,11 @@ export async function extractFinancialDataFromPDF(
         ],
       })
     );
+    return visionToFinancialData(visionData);
   } catch (err) {
     const msg = (err as Error).message ?? "알 수 없는 오류";
+    // rate-limit, 토큰 한도, 503 같은 환경 에러는 OCR 실패가 아니므로 원본 그대로 throw
+    if (isEnvironmentalError(msg)) throw err;
     throw new ScannedPdfError(msg);
   }
 }
