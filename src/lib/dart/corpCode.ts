@@ -1,20 +1,24 @@
-import { unzipSync, strFromU8 } from "fflate";
-import { dartFetchBinary } from "./client";
+import corpCodeData from "./corp-code-data.json";
 
 /**
  * DART corpCode 매핑 — 종목코드(6자리) → corp_code(8자리)
  *
  * DART는 자체 8자리 corp_code를 모든 API 키로 사용하지만, 사용자는
- * 6자리 KOSPI/KOSDAQ 종목코드만 알고 있다. DART는 두 코드 매핑을
- * `corpCode.xml.zip`(약 3MB ZIP)로 제공한다.
+ * 6자리 KOSPI/KOSDAQ 종목코드만 알고 있다.
  *
- * 캐시 전략:
- * - 메모리 Map (1일 TTL) — Vercel cold start마다 1초 미만 추가
- * - KV/Blob로 옮기는 것은 트래픽이 늘어난 후 (v6)
+ * 데이터 출처:
+ * - `corp-code-data.json` (정적, 빌드 시점에 생성됨)
+ * - `scripts/build-corp-code.mjs`가 빌드 시 DART corpCode.xml.zip을
+ *   다운로드 → 압축해제 → 파싱 → JSON으로 저장
  *
- * XML 파싱:
- * - 구조가 단순 (`<list><corp_code>...<stock_code>...</list>`)해서 정규식으로 충분
- * - fast-xml-parser 같은 의존성 안 추가 (fflate만 추가됨)
+ * 왜 빌드 시점에 하나 (이전 런타임 다운로드 방식 폐기 이유):
+ * - 런타임 cold start에서 3.5MB ZIP 다운로드 + 압축해제 + 100k 정규식
+ *   파싱이 Vercel(US East)에서 60~90초 → 사용자 첫 검색 timeout
+ * - 정적 JSON을 import하면 cold start ~5ms 이내로 단축
+ * - corp_code 매핑은 신생 상장이 잦지 않아 빌드 단위 신선도 충분
+ *
+ * 메모리 캐시는 더 이상 필요 없지만(이미 정적), 검색 인덱스 빌드만
+ * 한 번 해두기 위해 lazy Map을 유지한다.
  */
 
 type CorpEntry = {
@@ -23,75 +27,19 @@ type CorpEntry = {
   stockCode: string;
 };
 
-type Cache = {
-  byStockCode: Map<string, CorpEntry>;
-  expiresAt: number;
-};
-
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 1일
-let cache: Cache | null = null;
+let stockCodeIndex: Map<string, CorpEntry> | null = null;
 
 /**
- * corpCode.xml.zip 다운로드 + 압축 해제 + 파싱.
- *
- * 응답 ZIP 안에는 단일 CORPCODE.xml 파일 (UTF-8).
- * fflate.unzipSync는 동기지만 ZIP이 작아(3MB) 서버에서 50ms 이내.
+ * 정적 데이터로부터 stockCode 인덱스 1회 빌드 (lazy).
  */
-async function downloadCorpCodeXml(): Promise<string> {
-  const zipBuffer = await dartFetchBinary("corpCode.xml");
-  const files = unzipSync(new Uint8Array(zipBuffer));
-  // ZIP 안에 보통 "CORPCODE.xml" 한 개만 있음
-  const xmlEntry = Object.entries(files)[0];
-  if (!xmlEntry) {
-    throw new Error("DART corpCode.xml.zip에 파일이 없습니다.");
+function getIndex(): Map<string, CorpEntry> {
+  if (stockCodeIndex) return stockCodeIndex;
+  const idx = new Map<string, CorpEntry>();
+  for (const e of corpCodeData as CorpEntry[]) {
+    idx.set(e.stockCode, e);
   }
-  return strFromU8(xmlEntry[1]);
-}
-
-/**
- * XML에서 list 항목 파싱.
- *
- * 정규식 선택 이유:
- * - XML 구조가 매우 단순 (depth 2, 동일 패턴 반복)
- * - 100,000개 회사 × DOM 파서는 메모리·CPU 낭비
- * - 정규식 한 번 매칭으로 끝
- */
-function parseCorpCodeXml(xml: string): CorpEntry[] {
-  const entries: CorpEntry[] = [];
-  // <list> ... </list> 블록을 모두 찾는다
-  const listRegex = /<list>([\s\S]*?)<\/list>/g;
-  const fieldRegex = (tag: string) =>
-    new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`);
-
-  let match: RegExpExecArray | null;
-  while ((match = listRegex.exec(xml)) !== null) {
-    const block = match[1];
-    const corpCode = block.match(fieldRegex("corp_code"))?.[1]?.trim() ?? "";
-    const corpName = block.match(fieldRegex("corp_name"))?.[1]?.trim() ?? "";
-    const stockCode = block.match(fieldRegex("stock_code"))?.[1]?.trim() ?? "";
-
-    // 상장사만 (stock_code가 빈 항목은 비상장)
-    if (corpCode && stockCode) {
-      entries.push({ corpCode, corpName, stockCode });
-    }
-  }
-  return entries;
-}
-
-/**
- * 캐시 빌드 — 상장사만 stockCode 키로 인덱싱.
- */
-async function buildCache(): Promise<Cache> {
-  const xml = await downloadCorpCodeXml();
-  const entries = parseCorpCodeXml(xml);
-  const byStockCode = new Map<string, CorpEntry>();
-  for (const e of entries) {
-    byStockCode.set(e.stockCode, e);
-  }
-  return {
-    byStockCode,
-    expiresAt: Date.now() + CACHE_TTL_MS,
-  };
+  stockCodeIndex = idx;
+  return idx;
 }
 
 /**
@@ -102,13 +50,7 @@ async function buildCache(): Promise<Cache> {
  */
 export async function findCorpCode(stockCode: string): Promise<string | null> {
   const code = stockCode.replace(/[^\d]/g, "").padStart(6, "0");
-
-  if (!cache || cache.expiresAt < Date.now()) {
-    cache = await buildCache();
-    console.log(`[DART corpCode] 캐시 빌드: ${cache.byStockCode.size}개 상장사`);
-  }
-
-  const entry = cache.byStockCode.get(code);
+  const entry = getIndex().get(code);
   return entry?.corpCode ?? null;
 }
 
@@ -119,12 +61,7 @@ export async function findCorpInfo(
   stockCode: string
 ): Promise<CorpEntry | null> {
   const code = stockCode.replace(/[^\d]/g, "").padStart(6, "0");
-
-  if (!cache || cache.expiresAt < Date.now()) {
-    cache = await buildCache();
-  }
-
-  return cache.byStockCode.get(code) ?? null;
+  return getIndex().get(code) ?? null;
 }
 
 /**
@@ -180,10 +117,6 @@ export async function searchByName(
   const q = query.trim();
   if (q.length < 1) return [];
 
-  if (!cache || cache.expiresAt < Date.now()) {
-    cache = await buildCache();
-  }
-
   // 한글 → 영문 alias 적용 (있으면 추가 키워드로 함께 검색)
   const aliases = KOREAN_TO_ENGLISH_ALIASES[q.toLowerCase()] ?? [];
   const keywords = [q, ...aliases];
@@ -192,7 +125,7 @@ export async function searchByName(
   // 같은 stockCode 중복 방지를 위해 Map 사용
   const matchMap = new Map<string, CorpEntry>();
 
-  for (const entry of cache.byStockCode.values()) {
+  for (const entry of getIndex().values()) {
     const nameLower = entry.corpName.toLowerCase();
     if (keywordsLower.some((kw) => nameLower.includes(kw))) {
       matchMap.set(entry.stockCode, entry);

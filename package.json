@@ -4,9 +4,11 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "node scripts/build-corp-code.mjs",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "build:corp-code": "node scripts/build-corp-code.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.69",

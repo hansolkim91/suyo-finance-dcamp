@@ -85,7 +85,10 @@
       "Bash(vercel ls *)",
       "Bash(vercel alias *)",
       "Bash(vercel logs *)",
-      "Bash(tee /tmp/dev.log)"
+      "Bash(tee /tmp/dev.log)",
+      "Bash(git -c user.name=김한솔 -c user.email=hansol.kim@dcamp.kr commit -m ' *)",
+      "Bash(vercel env *)",
+      "Bash(rm -f master)"
     ],
     "deny": [
       "Bash(git push*)",
