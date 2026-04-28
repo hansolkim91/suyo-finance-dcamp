@@ -217,6 +217,9 @@ export async function POST(request: Request) {
   const systemPrompt = type === "listed" ? LISTED_PROMPT : PRIVATE_PROMPT;
 
   const generateArgs = {
+    // AI SDK 기본 retry(2회)는 Gemini 503 5초 backoff × 2회 = 30~60초 지연.
+    // 실측상 503은 retry해도 같은 시점엔 또 503 → 빨리 Anthropic 폴백 발동시킴.
+    maxRetries: 1,
     schema: checklistAiSchema,
     system: systemPrompt,
     prompt: `기업명: ${companyName}

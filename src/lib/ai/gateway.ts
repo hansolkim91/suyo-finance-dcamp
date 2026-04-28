@@ -13,6 +13,17 @@ import type { LanguageModel } from "ai";
 const MIN_TEXT_LENGTH_FOR_ANALYSIS = 500;
 
 /**
+ * AI SDK retry 횟수.
+ *
+ * 왜 1로 줄였나:
+ * - AI SDK 기본값은 2회 — 503 후 5초 backoff × 2회 = 30~60초 까먹음
+ * - Gemini "high demand"는 retry해도 같은 시점엔 또 503으로 떨어지는 패턴이 실측됨
+ * - 빨리 폴백(Anthropic) 발동시키는 게 사용자 체감에 훨씬 유리
+ * - 실제 네트워크 일시 깜빡임 회복력은 1회 retry로 충분
+ */
+const AI_MAX_RETRIES = 1;
+
+/**
  * Vision(OCR) 경로 전용 슬림 스키마.
  *
  * 왜 슬림하게 만드는가:
@@ -190,6 +201,7 @@ export async function extractFinancialDataFromPDF(
     return await withFallback(primary, fallback, (model) =>
       generateObject({
         model,
+        maxRetries: AI_MAX_RETRIES,
         schema: financialDataSchema,
         prompt: `${EXTRACTION_PROMPT}\n\n---\n${fullText}`,
       })
@@ -223,6 +235,7 @@ export async function extractFinancialDataFromPDF(
     const visionData = await withFallback(primary, fallback, (model) =>
       generateObject({
         model,
+        maxRetries: AI_MAX_RETRIES,
         schema: visionFinancialSchema,
         messages: [
           {
