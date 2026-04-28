@@ -1,6 +1,10 @@
 import { searchByName } from "@/lib/dart/corpCode";
 
 export const runtime = "nodejs";
+// cold start: corpCode.xml.zip(~3MB) 다운로드 + 압축해제 + 파싱이 처음 한 번 무거움
+// 특히 Vercel Production은 region latency로 1~2분까지 걸릴 수 있음
+// 캐시 hit 이후엔 ~10ms이지만 안전 마진을 위해 300초
+export const maxDuration = 300;
 
 /**
  * 상장사 회사명 자동완성 검색 API.

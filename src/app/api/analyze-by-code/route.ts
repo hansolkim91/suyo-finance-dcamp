@@ -2,8 +2,9 @@ import { fetchFinancialDataFromDart } from "@/lib/dart/financialStatement";
 import { DartError } from "@/lib/dart/client";
 
 export const runtime = "nodejs";
-// DART API는 1~2초로 빠르지만, corpCode.xml 첫 다운로드(~3MB)가 cold start에 1~2초 추가될 수 있음
-export const maxDuration = 60;
+// cold start: corpCode.xml.zip(~3MB) + fnlttSinglAcntAll 호출까지 합쳐 60초 초과 가능
+// 캐시 hit 이후엔 ~2~3초이지만 안전 마진을 위해 300초
+export const maxDuration = 300;
 
 /**
  * 상장사 DART 직조회 분석 라우트.
